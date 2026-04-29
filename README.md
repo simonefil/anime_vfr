@@ -10,6 +10,14 @@ La strategia di `anime_vfr` e' diversa: classificare il contenuto per frame/segm
 
 ## Installazione
 
+Prima di eseguire lo script, apri `config.py` e adatta i path dei binari alla tua macchina:
+
+- `MKVMERGE`, `MKVEXTRACT`, `VSPIPE`, `PYTHON_BIN`, `MEDIAINFO`, `FFMPEG`
+- `ENCODER_BIN`
+- `ENCODER_PARAMS`
+
+I parametri di compressione inclusi sono solo un preset operativo di esempio. Devi verificarli e modificarli in base all'encoder scelto, alla GPU/CPU disponibile e al livello qualitativo desiderato. In particolare, se non usi `NVEncC`, devi cambiare sia `ENCODER_BIN` sia `ENCODER_PARAMS` con una riga compatibile con il tuo encoder.
+
 Assicurati che `python` sia il Python dell'ambiente VapourSynth, cioe' quello in grado di importare `vapoursynth`. Servono: Python packages `numpy`, `vsdeinterlace`, `vsaa`, `vstools`, `vskernels` e relative dipendenze; plugin VapourSynth BestSource, TIVTC, Vinverse, Sneedif/NNEDI3 OpenCL e i plugin richiesti da `QTempGaussMC` come MVTools/RGTools/RemoveGrain o equivalenti della propria distribuzione; binari esterni `VSPipe`, `mkvmerge`, `mkvextract`, `MediaInfo`, `ffmpeg`; encoder video compatibile con input Y4M da pipe, ad esempio `ffmpeg`, Rigaya `NVEncC` per NVIDIA NVENC, Rigaya `QSVEncC` per Intel Quick Sync, Rigaya `VCEEncC` per AMD VCE/VCN/AMF, oppure Rigaya `rkmppenc` per Rockchip MPP. I path e i parametri dell'encoder si configurano in `config.py`.
 
 Verifiche minime:

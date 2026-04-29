@@ -10,6 +10,14 @@ Global solutions have heavy tradeoffs. Applying IVTC to the whole episode preser
 
 ## Installation
 
+Before running the script, open `config.py` and adapt binary paths to your machine:
+
+- `MKVMERGE`, `MKVEXTRACT`, `VSPIPE`, `PYTHON_BIN`, `MEDIAINFO`, `FFMPEG`
+- `ENCODER_BIN`
+- `ENCODER_PARAMS`
+
+The included compression parameters are only an example operational preset. You must review and change them according to the encoder you choose, the available GPU/CPU, and the quality level you want. In particular, if you do not use `NVEncC`, you must change both `ENCODER_BIN` and `ENCODER_PARAMS` to a command line compatible with your encoder.
+
 Make sure that `python` is the VapourSynth environment Python, that is, the Python executable able to import `vapoursynth`. Required components: Python packages `numpy`, `vsdeinterlace`, `vsaa`, `vstools`, `vskernels` and their dependencies; VapourSynth plugins BestSource, TIVTC, Vinverse, Sneedif/NNEDI3 OpenCL and the plugins required by `QTempGaussMC`, such as MVTools/RGTools/RemoveGrain or equivalent plugins from your own distribution; external binaries `VSPipe`, `mkvmerge`, `mkvextract`, `MediaInfo`, `ffmpeg`; a video encoder compatible with Y4M input from pipe, for example `ffmpeg`, Rigaya `NVEncC` for NVIDIA NVENC, Rigaya `QSVEncC` for Intel Quick Sync, Rigaya `VCEEncC` for AMD VCE/VCN/AMF, or Rigaya `rkmppenc` for Rockchip MPP. Binary paths and encoder parameters are configured in `config.py`.
 
 Minimal checks:
