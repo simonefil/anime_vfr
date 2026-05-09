@@ -47,7 +47,7 @@ Con `vsaa.NNEDI3(opencl=True)` il wrapper seleziona il backend OpenCL `core.lazy
 ## Uso Rapido
 
 ```powershell
-cd C:\Users\Simone\anime_vfr
+cd C:\percorso\anime_vfr
 python anime_vfr.py "C:\video\episodio.mkv" --analyze-only
 python anime_vfr.py "C:\video\episodio.mkv" --output "D:\encoded"
 ```
@@ -64,7 +64,7 @@ anime_vfr.py source [opzioni]
 | ----------------------- | ------------------------------------------------------------------------------------------ |
 | `source`                | File MKV sorgente, oppure cartella di MKV.                                                  |
 | `--report`              | Analizza MKV gia' prodotti leggendo i timestamps_v2; non esegue la pipeline.               |
-| `--analyze-only`        | Esegue analisi, classificazione, dedup, timecode e VPY, ma salta encode/mux.               |
+| `--analyze-only`        | Esegue analisi, classificazione, eventuale dedup, timecode e VPY, ma salta encode/mux.     |
 | `--bob`                 | Forza tutto il titolo a 60p bob e salta TIVTC/classificatore/dedup.                        |
 | `--bob-chapters LIST`   | Forza a 60p bob uno o piu' capitoli, es. `4` o `4,5,6`.                                    |
 | `--bob-range LIST`      | Forza a 60p bob uno o piu' range temporali, es. `22:30-23:50`.                             |
@@ -98,7 +98,7 @@ python anime_vfr.py "D:\encoded" --report
 
 ### `--analyze-only`
 
-Esegue la pipeline fino alla generazione dei timecode finali e dello script VPY, poi si ferma prima di encode e mux. Stampa su console classificazione 24/60, statistiche dedup, istogramma FPS pre-dedup su 20 bucket e istogramma drop dedup su 20 bucket.
+Esegue la pipeline fino alla generazione dei timecode finali e dello script VPY, poi si ferma prima di encode e mux. Stampa su console classificazione 24/60, statistiche dedup se il dedup e' abilitato, istogramma FPS pre-dedup su 20 bucket e istogramma drop dedup su 20 bucket.
 
 ```powershell
 python anime_vfr.py "C:\video\episodio.mkv" --analyze-only

@@ -47,7 +47,7 @@ With `vsaa.NNEDI3(opencl=True)`, the wrapper selects the OpenCL backend `core.la
 ## Quick Start
 
 ```powershell
-cd C:\Users\Simone\anime_vfr
+cd C:\path\to\anime_vfr
 python anime_vfr.py "C:\video\episode.mkv" --analyze-only
 python anime_vfr.py "C:\video\episode.mkv" --output "D:\encoded"
 ```
@@ -64,7 +64,7 @@ anime_vfr.py source [options]
 | ----------------------- | --------------------------------------------------------------------------------------------------- |
 | `source`                | Source MKV file, or folder containing MKV files.                                                     |
 | `--report`              | Analyzes already produced MKV files by reading timestamps_v2; does not run the pipeline.             |
-| `--analyze-only`        | Runs analysis, classification, dedup, timecodes and VPY generation, but skips encode/mux.            |
+| `--analyze-only`        | Runs analysis, classification, optional dedup, timecodes and VPY generation, but skips encode/mux.   |
 | `--bob`                 | Forces the whole title to 60p bob and skips TIVTC/classifier/dedup.                                  |
 | `--bob-chapters LIST`   | Forces one or more chapters to 60p bob, for example `4` or `4,5,6`.                                   |
 | `--bob-range LIST`      | Forces one or more time ranges to 60p bob, for example `22:30-23:50`.                                 |
@@ -98,7 +98,7 @@ python anime_vfr.py "D:\encoded" --report
 
 ### `--analyze-only`
 
-Runs the pipeline up to final timecode generation and VPY script generation, then stops before encode and mux. It prints to console the 24/60 classification, dedup statistics, a pre-dedup FPS histogram over 20 buckets, and a dedup-drop histogram over 20 buckets.
+Runs the pipeline up to final timecode generation and VPY script generation, then stops before encode and mux. It prints to console the 24/60 classification, dedup statistics when dedup is enabled, a pre-dedup FPS histogram over 20 buckets, and a dedup-drop histogram over 20 buckets.
 
 ```powershell
 python anime_vfr.py "C:\video\episode.mkv" --analyze-only
