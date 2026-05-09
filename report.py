@@ -113,10 +113,8 @@ def print_analyze_report(stem, entries, segments, src_tc_path, tc_final,
     print(f"  Film input:  {dedup_stats.get('input', 0) if dedup_stats else 0:8d}")
     print(f"  Film output: {dedup_stats.get('output', 0) if dedup_stats else 0:8d}")
     print(f"  Dropped:     {dedup_stats.get('saved', 0) if dedup_stats else 0:8d} ({dedup_stats.get('saved_pct', 0.0) if dedup_stats else 0.0:6.2f}%)")
-    print(f"  1-in-1: {run(1)}")
-    print(f"  2-in-1: {run(2)}")
-    print(f"  3-in-1: {run(3)}")
-    print(f"  4-in-1: {run(4)}")
+    for n in range(1, len(run_hist)):
+        print(f"  {n}-in-1: {run(n)}")
     print("")
     print("Output post-dedup:")
     print(f"  24p film: {film_out:8d} frame ({pct(film_out, post_total):6.2f}%)")

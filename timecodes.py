@@ -38,7 +38,19 @@ def generate_final_timecodes_v2(entries, segments, src_tc_path, output_path):
             t_end = source_end_ms(src_tc) if src_tc else 0.0
 
         num_dec = seg["num_dec_frames"]
-        if seg_type == "film" and "kept_frames" in seg:
+        if seg_type == "video_bob" and "src_indices" in seg:
+            for src_idx in seg["src_indices"]:
+                if src_idx >= len(src_tc):
+                    continue
+                cur = src_tc[src_idx]
+                if src_idx + 1 < len(src_tc):
+                    nxt = src_tc[src_idx + 1]
+                else:
+                    nxt = source_end_ms(src_tc)
+                half = (nxt - cur) / 2.0
+                timecodes.append(cur)
+                timecodes.append(cur + half)
+        elif seg_type == "film" and "kept_frames" in seg:
             base_dt = (t_end - t_start) / num_dec
             cum = 0
             for _idx, run_len in seg["kept_frames"]:

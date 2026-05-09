@@ -19,6 +19,7 @@ from config import (
     MM_FFT_PROMOTION_ENABLED,
     MM_FFT_PROMOTION_MIN_MOTION,
     MM_FFT_VERY_LOW,
+    MM_BOB_GAP_MAX,
     MM_INHERITANCE_DENSITY_WIN,
     MM_INHERITANCE_DOMINANCE,
     MM_ISOLATION_RATIO,
@@ -34,6 +35,9 @@ from config import (
     MM_VERTICAL_SCROLL_IMPROVEMENT_MIN,
     MM_VERTICAL_SCROLL_MIN_HITS,
     MM_VERTICAL_SCROLL_MIN_RUN,
+    MM_VERTICAL_SCROLL_SOFT_BEST_MAX,
+    MM_VERTICAL_SCROLL_SOFT_DIRECT_MIN,
+    MM_VERTICAL_SCROLL_SOFT_IMPROVEMENT_MIN,
     MM_VERTICAL_SCROLL_SHIFT,
     MM_VERTICAL_SCROLL_WINDOW,
     PYTHON_BIN,
@@ -43,7 +47,9 @@ from dedup import run_dedup_detection, run_progressive_dedup_detection
 from encode import encode, get_color_flags, mux_final
 from media import (
     calc_square_pixel_res,
+    extract_chapter_ranges,
     extract_source_timecodes,
+    get_video_frame_count,
     get_video_info,
 )
 from report import print_analyze_report, run_report
@@ -54,9 +60,10 @@ from segments import (
     make_progressive_entries_from_source_timecodes,
     parse_framemap,
 )
-from timecodes import generate_final_timecodes_v2
+from timecodes import generate_final_timecodes_v2, source_end_ms
 from utils import (
     box_max_16 as _box_max_16,
+    read_timecodes_v2,
 )
 
 
@@ -277,11 +284,19 @@ def _vertical_shift_match(field, prev_field):
 def _is_vertical_scroll_hit(field, prev_field):
     """Riconosce una transizione da scroll verticale interlacciato."""
     direct, best, shift = _vertical_shift_match(field, prev_field)
+    improvement = direct - best
     return (
-        shift == MM_VERTICAL_SCROLL_SHIFT and
-        direct >= MM_VERTICAL_SCROLL_DIRECT_MIN and
-        best <= MM_VERTICAL_SCROLL_BEST_MAX and
-        direct - best >= MM_VERTICAL_SCROLL_IMPROVEMENT_MIN
+        shift == MM_VERTICAL_SCROLL_SHIFT and (
+            (
+                direct >= MM_VERTICAL_SCROLL_DIRECT_MIN and
+                best <= MM_VERTICAL_SCROLL_BEST_MAX and
+                improvement >= MM_VERTICAL_SCROLL_IMPROVEMENT_MIN
+            ) or (
+                direct >= MM_VERTICAL_SCROLL_SOFT_DIRECT_MIN and
+                best <= MM_VERTICAL_SCROLL_SOFT_BEST_MAX and
+                improvement >= MM_VERTICAL_SCROLL_SOFT_IMPROVEMENT_MIN
+            )
+        )
     )
 
 
@@ -292,40 +307,51 @@ def _vertical_scroll_filter(classifications, vertical_scroll_hits):
     if not vertical_scroll_hits:
         return list(classifications), 0
 
+    force_mask = _vertical_scroll_force_mask(len(classifications), vertical_scroll_hits)
+    new_cls = list(classifications)
+    changed = 0
+    for i, force in enumerate(force_mask):
+        if force and new_cls[i] != "interlaced_60i":
+            new_cls[i] = "interlaced_60i"
+            changed += 1
+    return new_cls, changed
+
+
+def _vertical_scroll_force_mask(n_frames, vertical_scroll_hits):
+    """Costruisce la maschera dei frame con scroll verticale 60i affidabile."""
+    if not MM_VERTICAL_SCROLL_ENABLED or not vertical_scroll_hits:
+        return [False] * n_frames
+
     win = max(1, MM_VERTICAL_SCROLL_WINDOW)
     half = win // 2
     min_hits = max(1, MM_VERTICAL_SCROLL_MIN_HITS)
-    N = len(classifications)
-    cum = [0] * (N + 1)
-    for i, hit in enumerate(vertical_scroll_hits[:N]):
+    cum = [0] * (n_frames + 1)
+    for i, hit in enumerate(vertical_scroll_hits[:n_frames]):
         cum[i + 1] = cum[i] + (1 if hit else 0)
-    for i in range(len(vertical_scroll_hits), N):
+    for i in range(len(vertical_scroll_hits), n_frames):
         cum[i + 1] = cum[i]
 
-    new_cls = list(classifications)
-    changed = 0
-    force_flags = [False] * N
-    for i in range(N):
+    force_flags = [False] * n_frames
+    for i in range(n_frames):
         ws = max(0, i - half)
-        we = min(N, i + half + 1)
+        we = min(n_frames, i + half + 1)
         force_flags[i] = cum[we] - cum[ws] >= min_hits
 
     min_run = max(1, MM_VERTICAL_SCROLL_MIN_RUN)
+    force_mask = [False] * n_frames
     i = 0
-    while i < N:
+    while i < n_frames:
         if not force_flags[i]:
             i += 1
             continue
         start = i
-        while i < N and force_flags[i]:
+        while i < n_frames and force_flags[i]:
             i += 1
         if i - start < min_run:
             continue
         for j in range(start, i):
-            if new_cls[j] != "interlaced_60i":
-                new_cls[j] = "interlaced_60i"
-                changed += 1
-    return new_cls, changed
+            force_mask[j] = True
+    return force_mask
 
 
 def _phase_consistency_filter(classifications):
@@ -372,6 +398,38 @@ def _cluster_isolation_filter(classifications):
                 new_cls[k] = "ambiguous_to_60i"
                 n_demoted += 1
     return new_cls, n_demoted
+
+
+def _short_bob_gap_filter(classifications):
+    """Assorbe piccole isole 24p chiuse tra due sezioni 60i."""
+    max_gap = max(0, MM_BOB_GAP_MAX)
+    if max_gap == 0:
+        return list(classifications), 0
+
+    runs = []
+    i = 0
+    while i < len(classifications):
+        cur = classifications[i]
+        start = i
+        while i < len(classifications) and classifications[i] == cur:
+            i += 1
+        runs.append({"type": cur, "start": start, "end": i - 1, "len": i - start})
+
+    new_cls = list(classifications)
+    changed = 0
+    for idx, run in enumerate(runs):
+        if run["type"] != "telecine_24p" or run["len"] > max_gap:
+            continue
+        prev_run = runs[idx - 1] if idx > 0 else None
+        next_run = runs[idx + 1] if idx + 1 < len(runs) else None
+        if (
+            prev_run and prev_run["type"] == "interlaced_60i" and
+            next_run and next_run["type"] == "interlaced_60i"
+        ):
+            for frame in range(run["start"], run["end"] + 1):
+                new_cls[frame] = "interlaced_60i"
+                changed += 1
+    return new_cls, changed
 
 
 def _nearest_anchor_inheritance(classifications):
@@ -459,7 +517,8 @@ def _nearest_anchor_inheritance(classifications):
     return new_cls
 
 
-def _speculative_ivtc_verification(source_clip, classifications, motion_arr, work_dir, log_prefix=""):
+def _speculative_ivtc_verification(source_clip, classifications, motion_arr, work_dir,
+                                   locked_60i_mask=None, log_prefix=""):
     """Verifica se alcuni cluster 60i possono essere recuperati come 24p.
     Per ogni cluster sufficientemente lungo applica TFM speculativo e misura
     quanti frame restano combed sull'output.
@@ -486,8 +545,12 @@ def _speculative_ivtc_verification(source_clip, classifications, motion_arr, wor
     n_recovered = 0
     n_verified = 0
     n_skipped_low_motion = 0
+    n_skipped_locked = 0
     for run in runs:
         if run["type"] != "interlaced_60i" or run["len"] < MM_VERIFY_MIN_SIZE:
+            continue
+        if locked_60i_mask is not None and any(locked_60i_mask[run["start"]:run["end"] + 1]):
+            n_skipped_locked += 1
             continue
         # Calcoliamo il movimento medio del cluster. motion_arr e' indicizzato
         # per campo, quindi ogni frame sorgente occupa due posizioni.
@@ -515,7 +578,12 @@ def _speculative_ivtc_verification(source_clip, classifications, motion_arr, wor
                 print(f"{log_prefix}    Recuperato cluster sorgente {run['start']}-{run['end']} ({run['len']} fr): combed={ratio:.3f}, movimento={avg_m:.1f}")
         except Exception as e:
             print(f"{log_prefix}    Verifica fallita per cluster {run['start']}-{run['end']}: {e}")
-    print(f"{log_prefix}  Verificati {n_verified} cluster ({n_skipped_low_motion} saltati per basso movimento), recuperati {n_recovered} frame")
+    print(
+        f"{log_prefix}  Verificati {n_verified} cluster "
+        f"({n_skipped_low_motion} saltati per basso movimento, "
+        f"{n_skipped_locked} protetti da scroll verticale), "
+        f"recuperati {n_recovered} frame"
+    )
     return new_cls
 
 
@@ -647,8 +715,16 @@ def run_multimetric_classification(source_path, work_dir, tfm_path):
     # Verifica IVTC speculativa: tenta di recuperare cluster 60i che diventano
     # puliti dopo TFM lento.
     print(f"  Verifica IVTC speculativa sui cluster 60i >= {MM_VERIFY_MIN_SIZE} frame...")
+    locked_60i_mask = _vertical_scroll_force_mask(N_src, vertical_scroll_hits)
     pre_verify = list(classifications)
-    classifications = _speculative_ivtc_verification(clip, classifications, motion_arr, work_dir, log_prefix="  ")
+    classifications = _speculative_ivtc_verification(
+        clip,
+        classifications,
+        motion_arr,
+        work_dir,
+        locked_60i_mask=locked_60i_mask,
+        log_prefix="  ",
+    )
     for i in range(N_src):
         if pre_verify[i] == "interlaced_60i" and classifications[i] == "telecine_24p":
             origins[i] = "recovered_by_verification"
@@ -663,6 +739,14 @@ def run_multimetric_classification(source_path, work_dir, tfm_path):
             origins[i] = "vertical_scroll"
     if n_scroll_final:
         print(f"  Scroll verticale: forzati {n_scroll_final} frame a 60i")
+
+    pre_gap_final = list(classifications)
+    classifications, n_gap_final = _short_bob_gap_filter(classifications)
+    for i in range(N_src):
+        if pre_gap_final[i] != "interlaced_60i" and classifications[i] == "interlaced_60i":
+            origins[i] = "short_gap_between_60i"
+    if n_gap_final:
+        print(f"  Gap corti tra sezioni 60i: forzati {n_gap_final} frame a 60i")
 
     # Riepilogo finale della classificazione sorgente.
     from collections import Counter
@@ -748,9 +832,10 @@ bobbed = core.resize.Bicubic(bobbed, format=vs.YUV420P10)
                 d_e = seg["dec_end"] + 1
                 script += f'segments.append({film_clip_name}[{d_s}:{d_e}])\n'
         elif seg["type"] == "video_bob":
-            # Per i segmenti bob prendiamo ogni indice sorgente singolarmente.
-            # In questo modo non includiamo frame che TDecimate ha saltato e il
-            # conteggio output resta esattamente num_dec_frames * 2.
+            # Per i segmenti bob usiamo gli indici sorgente continui ricostruiti
+            # dalla segmentazione. Il ramo 60i non puo' dipendere dalla timeline
+            # TDecimate, altrimenti i frame saltati dal decimatore diventerebbero
+            # buchi temporali nel bob.
             indexes = []
             for si in seg["src_indices"]:
                 indexes.extend((si * 2, si * 2 + 1))
@@ -787,16 +872,107 @@ def _print_progressive_dedup_report(stem, film_dec, film_out, total_out, dedup_s
     print(f"  Frame rimossi:   {film_dec - film_out:8d} ({(film_dec - film_out) / max(film_dec, 1) * 100:6.2f}%)")
     print(f"  Timecode finali: {total_out:8d}")
     print("  Run dedup:")
-    print(f"    1-in-1: {run(1)}")
-    print(f"    2-in-1: {run(2)}")
-    print(f"    3-in-1: {run(3)}")
-    print(f"    4-in-1: {run(4)}")
+    for n in range(1, len(run_hist)):
+        print(f"    {n}-in-1: {run(n)}")
     print(f"  TC: {tc_final.name}")
+
+
+def _parse_time_ms(value):
+    """Converte hh:mm:ss.xxx, mm:ss.xxx o secondi in millisecondi."""
+    parts = value.strip().split(":")
+    if len(parts) == 1:
+        return float(parts[0]) * 1000.0
+    if len(parts) == 2:
+        return (int(parts[0]) * 60000.0) + (float(parts[1]) * 1000.0)
+    if len(parts) == 3:
+        return (int(parts[0]) * 3600000.0) + (int(parts[1]) * 60000.0) + (float(parts[2]) * 1000.0)
+    raise ValueError(f"Timestamp non valido: {value}")
+
+
+def _parse_bob_range_spec(spec):
+    """Converte START-END,START-END in range millisecondi."""
+    ranges = []
+    if not spec:
+        return ranges
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "-" not in item:
+            raise ValueError(f"Range bob non valido: {item}")
+        start, end = item.split("-", 1)
+        start_ms = _parse_time_ms(start)
+        end_ms = _parse_time_ms(end)
+        if end_ms <= start_ms:
+            raise ValueError(f"Range bob con fine <= inizio: {item}")
+        ranges.append((start_ms, end_ms))
+    return ranges
+
+
+def _parse_chapter_list(spec):
+    """Converte 4,5,6 in indici capitolo 1-based."""
+    chapters = []
+    if not spec:
+        return chapters
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        chapter = int(item)
+        if chapter <= 0:
+            raise ValueError(f"Capitolo non valido: {item}")
+        chapters.append(chapter)
+    return chapters
+
+
+def _parse_dedup_cap(value, option_name):
+    """Valida il cap dedup passato da CLI."""
+    if value is None:
+        return None
+    cap = int(value)
+    if cap < 1:
+        raise ValueError(f"{option_name} deve essere >= 1")
+    return cap
+
+
+def _bob_ranges_from_chapters(source_path, work_dir, chapters):
+    """Estrae i range temporali dei capitoli da forzare a bob."""
+    if not chapters:
+        return []
+    chapters_xml = work_dir / f"{source_path.stem}_chapters.xml"
+    chapter_ranges = extract_chapter_ranges(source_path, chapters_xml)
+    ranges = []
+    for chapter in chapters:
+        idx = chapter - 1
+        if idx < 0 or idx >= len(chapter_ranges):
+            raise RuntimeError(f"Capitolo {chapter} non presente nel file sorgente")
+        ranges.append(chapter_ranges[idx])
+    return ranges
+
+
+def _apply_bob_time_overrides(classifications, src_tc_path, ranges):
+    """Forza a 60i i frame sorgente che intersecano range temporali espliciti."""
+    if not ranges:
+        return list(classifications), 0
+
+    src_tc = read_timecodes_v2(src_tc_path)
+    source_end = source_end_ms(src_tc)
+    normalized = [(start, source_end if end is None else end) for start, end in ranges]
+
+    new_cls = list(classifications)
+    changed = 0
+    for idx, start in enumerate(src_tc):
+        end = src_tc[idx + 1] if idx + 1 < len(src_tc) else source_end
+        if any(end > range_start and start < range_end for range_start, range_end in normalized):
+            if new_cls[idx] != "interlaced_60i":
+                new_cls[idx] = "interlaced_60i"
+                changed += 1
+    return new_cls, changed
 
 
 def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, additional_vpy=None,
                     frame_range=None, bob=False, analyze_only=False, progressive_dedup=False,
-                    dedup_enabled=False):
+                    dedup_enabled=False, dedup_cap=None, bob_chapters=None, bob_ranges=None):
     # Pipeline completa per un episodio: analisi sorgente, classificazione,
     # segmentazione, dedup, generazione timecode, script VPY, encode e mux.
     stem = source_path.stem
@@ -807,6 +983,7 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
     print(f"{'=' * 60}")
 
     w, h, sar_num, sar_den = get_video_info(source_path)
+    source_frame_count = get_video_frame_count(source_path)
     resize_w, resize_h = calc_square_pixel_res(w, h, sar_num, sar_den)
     print(f"  Sorgente: {w}x{h} SAR {sar_num}:{sar_den} -> {resize_w}x{resize_h}")
 
@@ -818,16 +995,29 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
     tfm_path = None
     if progressive_dedup:
         print(f"  --progressive-dedup attivo: salto TIVTC/classificatore/bob, dedup diretto su sorgente progressiva")
-        entries = make_progressive_entries_from_source_timecodes(src_tc_path)
+        entries = make_progressive_entries_from_source_timecodes(src_tc_path, source_frame_count)
     elif bob:
         print(f"  --bob attivo: salto TIVTC/classificatore/dedup, forzo tutto a video_bob (60fps)")
-        entries = make_bob_entries_from_source_timecodes(src_tc_path)
+        entries = make_bob_entries_from_source_timecodes(src_tc_path, source_frame_count)
     else:
         stats_path, tfm_path = run_pass1(source_path, work_dir)
         _tc_v1_path, framemap_path = run_pass2a(source_path, stats_path, tfm_path, work_dir)
         entries = parse_framemap(framemap_path)
         # Classificazione multi-metrica dei frame sorgente e applicazione al framemap.
         classifications = run_multimetric_classification(source_path, work_dir, tfm_path)
+        forced_ranges = []
+        if bob_chapters:
+            forced_ranges.extend(_bob_ranges_from_chapters(source_path, work_dir, bob_chapters))
+        if bob_ranges:
+            forced_ranges.extend(bob_ranges)
+        if forced_ranges:
+            classifications, forced_count = _apply_bob_time_overrides(classifications, src_tc_path, forced_ranges)
+            src_end = source_end_ms(read_timecodes_v2(src_tc_path))
+            range_text = ", ".join(
+                f"{start / 1000.0:.3f}-{(end if end is not None else src_end) / 1000.0:.3f}s"
+                for start, end in forced_ranges
+            )
+            print(f"  Override bob esplicito: {forced_count} frame sorgente forzati a 60i ({range_text})")
         entries = apply_classification_overrides(entries, classifications)
 
     segments = framemap_to_segments(entries)
@@ -837,17 +1027,18 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
         raise RuntimeError(f"Segmenti non binari trovati: {invalid_types}")
 
     # Dedup dei segmenti film. In modalita' bob non esistono segmenti film.
+    effective_dedup_cap = dedup_cap or MM_DEDUP_CAP
     dedup_active = (progressive_dedup or dedup_enabled) and MM_DEDUP_ENABLED and not bob
-    dedup_stats = {"input": 0, "output": 0, "saved": 0, "saved_pct": 0.0, "run_hist": [0] * (MM_DEDUP_CAP + 1)}
+    dedup_stats = {"input": 0, "output": 0, "saved": 0, "saved_pct": 0.0, "run_hist": [0] * (effective_dedup_cap + 1)}
     if progressive_dedup and dedup_active:
-        dedup_stats = run_progressive_dedup_detection(source_path, segments)
+        dedup_stats = run_progressive_dedup_detection(source_path, segments, cap=effective_dedup_cap)
     elif dedup_active:
-        dedup_stats = run_dedup_detection(source_path, work_dir, tfm_path, stats_path, segments)
+        dedup_stats = run_dedup_detection(source_path, work_dir, tfm_path, stats_path, segments, cap=effective_dedup_cap)
 
     film_dec = sum(s["num_dec_frames"] for s in segments if s["type"] == "film")
     bob_dec = sum(s["num_dec_frames"] for s in segments if s["type"] == "video_bob")
     if not dedup_active:
-        dedup_stats = {"input": film_dec, "output": film_dec, "saved": 0, "saved_pct": 0.0, "run_hist": [0] * (MM_DEDUP_CAP + 1)}
+        dedup_stats = {"input": film_dec, "output": film_dec, "saved": 0, "saved_pct": 0.0, "run_hist": [0] * (effective_dedup_cap + 1)}
         if film_dec and len(dedup_stats["run_hist"]) > 1:
             dedup_stats["run_hist"][1] = film_dec
     # Conteggio output: il film tiene conto dei frame rimasti dopo dedup,
@@ -1030,16 +1221,27 @@ def main():
     parser.add_argument("--additional-vpy", default=None, help="Script VPY aggiuntivo da appendere al pass2b (opera su 'clip')")
     parser.add_argument("--frames", default=None, help="Range di frame output da elaborare (es. 1500 o 100-5000)")
     parser.add_argument("--bob", action="store_true", help="Forza bob deinterlace di tutto il titolo e salta classifier/dedup.")
-    parser.add_argument("--progressive-dedup", action="store_true", help="Deduplica una sorgente progressiva senza TIVTC/classifier/bob.")
-    parser.add_argument("--dedup", action="store_true", help="Abilita il dedup sui segmenti film della pipeline ibrida.")
+    parser.add_argument("--bob-chapters", default=None, help="Forza a bob capitoli 1-based separati da virgola, es. 4 o 4,5,6.")
+    parser.add_argument("--bob-range", default=None, help="Forza a bob range temporali START-END separati da virgola, es. 22:30-23:50,10:00-10:20.")
+    parser.add_argument("--progressive-dedup", nargs="?", const="2", default=None, metavar="N", help="Deduplica una sorgente progressiva; N opzionale indica il massimo run da unificare (default se omesso: 2).")
+    parser.add_argument("--dedup", nargs="?", const="2", default=None, metavar="N", help="Abilita il dedup sui segmenti film; N opzionale indica il massimo run da unificare (default se omesso: 2).")
     args = parser.parse_args()
 
     source = Path(args.source)
     if not source.exists():
         print(f"Errore: {source} non trovato")
         sys.exit(1)
-    if args.bob and args.progressive_dedup:
+    progressive_dedup_enabled = args.progressive_dedup is not None
+    dedup_enabled = args.dedup is not None
+
+    if args.bob and progressive_dedup_enabled:
         print("Errore: --bob e --progressive-dedup sono mutuamente esclusivi")
+        sys.exit(1)
+    if args.bob and (args.bob_chapters or args.bob_range):
+        print("Errore: --bob non puo' essere combinato con --bob-chapters o --bob-range")
+        sys.exit(1)
+    if progressive_dedup_enabled and (args.bob_chapters or args.bob_range):
+        print("Errore: --progressive-dedup non puo' essere combinato con --bob-chapters o --bob-range")
         sys.exit(1)
 
     if args.report:
@@ -1052,8 +1254,11 @@ def main():
         if args.work_dir is not None: forbidden.append("--work-dir")
         if args.additional_vpy is not None: forbidden.append("--additional-vpy")
         if args.frames is not None: forbidden.append("--frames")
-        if args.progressive_dedup: forbidden.append("--progressive-dedup")
-        if args.dedup: forbidden.append("--dedup")
+        if args.bob: forbidden.append("--bob")
+        if args.bob_chapters is not None: forbidden.append("--bob-chapters")
+        if args.bob_range is not None: forbidden.append("--bob-range")
+        if progressive_dedup_enabled: forbidden.append("--progressive-dedup")
+        if dedup_enabled: forbidden.append("--dedup")
         if forbidden:
             print(f"Errore: --report non puo' essere combinato con: {', '.join(forbidden)}")
             sys.exit(1)
@@ -1074,6 +1279,16 @@ def main():
         else:
             frame_range = (0, int(args.frames))
 
+    try:
+        bob_chapters = _parse_chapter_list(args.bob_chapters)
+        bob_ranges = _parse_bob_range_spec(args.bob_range)
+        progressive_dedup_cap = _parse_dedup_cap(args.progressive_dedup, "--progressive-dedup")
+        hybrid_dedup_cap = _parse_dedup_cap(args.dedup, "--dedup")
+    except ValueError as exc:
+        print(f"Errore: {exc}")
+        sys.exit(1)
+    dedup_cap = progressive_dedup_cap if progressive_dedup_enabled else hybrid_dedup_cap
+
     if source.is_dir():
         sources = sorted(source.glob("*.mkv"))
         if not sources:
@@ -1088,12 +1303,15 @@ def main():
             print(f"  {src.name} -> {output_path.name}")
             ep_stats = process_episode(src, output_path, work_dir, args.strip_audio, args.strip_sub, args.additional_vpy,
                                        frame_range, bob=args.bob, analyze_only=args.analyze_only,
-                                       progressive_dedup=args.progressive_dedup,
-                                       dedup_enabled=args.dedup)
+                                       progressive_dedup=progressive_dedup_enabled,
+                                       dedup_enabled=dedup_enabled,
+                                       dedup_cap=dedup_cap,
+                                       bob_chapters=bob_chapters,
+                                       bob_ranges=bob_ranges)
             all_stats.append(ep_stats)
             if not args.keep_work:
                 _cleanup_work_dir(work_dir)
-        if args.progressive_dedup:
+        if progressive_dedup_enabled:
             _print_progressive_summary(all_stats)
             return
         _print_hybrid_summary(all_stats)
@@ -1106,10 +1324,13 @@ def main():
     print(f"Output:   {output_path}")
     ep_stats = process_episode(source, output_path, work_dir, args.strip_audio, args.strip_sub, args.additional_vpy,
                                frame_range, bob=args.bob, analyze_only=args.analyze_only,
-                               progressive_dedup=args.progressive_dedup,
-                               dedup_enabled=args.dedup)
+                               progressive_dedup=progressive_dedup_enabled,
+                               dedup_enabled=dedup_enabled,
+                               dedup_cap=dedup_cap,
+                               bob_chapters=bob_chapters,
+                               bob_ranges=bob_ranges)
     all_stats = [ep_stats]
-    if args.progressive_dedup:
+    if progressive_dedup_enabled:
         _print_progressive_summary(all_stats)
         if not args.keep_work:
             _cleanup_work_dir(work_dir)

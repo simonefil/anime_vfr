@@ -67,21 +67,32 @@ def framemap_to_segments(entries):
             "src_end": entries[e][1],
             "num_dec_frames": e - s + 1,
         }
-        # Nei segmenti bob salviamo gli indici sorgente esatti: TDecimate puo'
-        # aver saltato frame sorgente dentro la stessa sezione visiva.
+        # Nei segmenti bob dobbiamo tornare alla timeline sorgente continua.
+        # Il framemap arriva dalla timeline TDecimate e puo' non contenere tutti
+        # i frame sorgente di una sezione poi riclassificata 60i. Se usassimo
+        # solo le entry decimate, il bob perderebbe campi reali e i timecode
+        # stirerebbero il segmento a un framerate intermedio.
         if seg["type"] == "video_bob":
-            item["src_indices"] = [entries[i][1] for i in range(s, e + 1)]
+            next_src = entries[e + 1][1] if e + 1 < len(entries) else entries[e][1] + 1
+            src_start = entries[s][1]
+            src_end_exclusive = max(next_src, entries[e][1] + 1)
+            item["src_indices"] = list(range(src_start, src_end_exclusive))
+            item["src_start"] = src_start
+            item["src_end"] = src_end_exclusive - 1
+            item["num_dec_frames"] = len(item["src_indices"])
         result.append(item)
     return result
 
 
-def make_bob_entries_from_source_timecodes(src_tc_path):
+def make_bob_entries_from_source_timecodes(src_tc_path, frame_count=None):
     """Crea un framemap tutto-bob allineato ai timestamp sorgente."""
     src_tc = read_timecodes_v2(src_tc_path)
-    return [(i, i, 30000, 1) for i in range(len(src_tc))]
+    count = min(len(src_tc), frame_count) if frame_count is not None else len(src_tc)
+    return [(i, i, 30000, 1) for i in range(count)]
 
 
-def make_progressive_entries_from_source_timecodes(src_tc_path):
+def make_progressive_entries_from_source_timecodes(src_tc_path, frame_count=None):
     """Crea un framemap progressivo lineare allineato ai timestamp sorgente."""
     src_tc = read_timecodes_v2(src_tc_path)
-    return [(i, i, 24000, 0) for i in range(len(src_tc))]
+    count = min(len(src_tc), frame_count) if frame_count is not None else len(src_tc)
+    return [(i, i, 24000, 0) for i in range(count)]

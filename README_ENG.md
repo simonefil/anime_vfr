@@ -66,8 +66,10 @@ anime_vfr.py source [options]
 | `--report`              | Analyzes already produced MKV files by reading timestamps_v2; does not run the pipeline.             |
 | `--analyze-only`        | Runs analysis, classification, dedup, timecodes and VPY generation, but skips encode/mux.            |
 | `--bob`                 | Forces the whole title to 60p bob and skips TIVTC/classifier/dedup.                                  |
-| `--progressive-dedup`   | Deduplicates an already progressive source without TIVTC/classifier/bob.                             |
-| `--dedup`               | Enables dedup on film segments in the hybrid pipeline.                                               |
+| `--bob-chapters LIST`   | Forces one or more chapters to 60p bob, for example `4` or `4,5,6`.                                   |
+| `--bob-range LIST`      | Forces one or more time ranges to 60p bob, for example `22:30-23:50`.                                 |
+| `--progressive-dedup [N]` | Deduplicates an already progressive source; optional `N` limits the maximum duplicate run.          |
+| `--dedup [N]`           | Enables dedup on film segments; optional `N` limits the maximum duplicate run.                       |
 | `--output PATH`         | Output folder; when specified, keeps the source filename.                                            |
 | `--work-dir PATH`       | Working folder; if omitted, uses `<output>\work`.                                                    |
 | `--keep-work`           | Keeps intermediate files instead of cleaning the work dir at the end of processing.                  |
@@ -111,23 +113,38 @@ Forces the whole title to 60p bob. It is useful when you already know the source
 python anime_vfr.py "C:\video\episode.mkv" --bob
 ```
 
+### `--bob-chapters` and `--bob-range`
+
+Force only selected parts of the title to 60p bob, while the rest of the episode remains controlled by automatic classification. They are meant for sections known in advance to contain real interlaced motion, for example endings with credits or vertical scrolls that must stay fluid. `--bob-chapters` uses 1-based chapter indices read from the source MKV; `--bob-range` uses manual `START-END` time ranges separated by commas.
+
+These overrides are applied after the classifier and before final segmentation. They do not use the decimated timeline: frames in the selected range are forced to `video_bob` on the source timeline, so each source frame generates two output frames and timecodes split the real source-frame duration in half. They are mutually exclusive with `--bob`, `--progressive-dedup`, and `--report`.
+
+```powershell
+python anime_vfr.py "C:\video\episode.mkv" --bob-chapters 4
+python anime_vfr.py "C:\video\episode.mkv" --bob-chapters 4,5,6
+python anime_vfr.py "C:\video\episode.mkv" --bob-range 22:30-23:50
+python anime_vfr.py "C:\video\episode.mkv" --bob-range 22:30-23:50,10:00-10:20
+```
+
 ### `--progressive-dedup`
 
-Uses only the dedup/timecode part on an already progressive source. It skips TIVTC, the classifier, and bob: every source frame is treated as a valid progressive frame, then visually duplicated frames are removed and their duration is transferred to VFR timecodes.
+Uses only the dedup/timecode part on an already progressive source. It skips TIVTC, the classifier, and bob: every source frame is treated as a valid progressive frame, then visually duplicated frames are removed and their duration is transferred to VFR timecodes. The optional `N` value sets how many consecutive frames may be compacted at most; when you write only `--progressive-dedup`, `N=2` is used.
 
 This mode is meant for sources that do not need IVTC or deinterlacing, but contain real holds/duplicates that should be compacted into VFR. It is not suitable for interlaced sources or telecined sources that have not already been resolved.
 
 ```powershell
 python anime_vfr.py "C:\video\progressive.mkv" --progressive-dedup --analyze-only
+python anime_vfr.py "C:\video\progressive.mkv" --progressive-dedup 4 --analyze-only
 python anime_vfr.py "C:\video\progressive.mkv" --progressive-dedup --output "D:\encoded"
 ```
 
 ### `--dedup`
 
-Enables dedup on film segments in the hybrid pipeline. Without this flag, the pipeline performs IVTC, 24/60 classification, bob of truly interlaced sections, and VFR timecode generation, but keeps all decimated film frames. `--dedup` is used when you want to compact holds and visual duplicates by transferring their duration to VFR timecodes.
+Enables dedup on film segments in the hybrid pipeline. Without this flag, the pipeline performs IVTC, 24/60 classification, bob of truly interlaced sections, and VFR timecode generation, but keeps all decimated film frames. `--dedup` is used when you want to compact holds and visual duplicates by transferring their duration to VFR timecodes. The optional `N` value sets how many consecutive frames may be compacted at most; when you write only `--dedup`, `N=2` is used.
 
 ```powershell
 python anime_vfr.py "C:\video\episode.mkv" --dedup
+python anime_vfr.py "C:\video\episode.mkv" --dedup 4
 ```
 
 ### `--output` and `--work-dir`
@@ -217,6 +234,8 @@ The pattern alone is not enough. The pipeline also measures field motion and an 
 After initial classification, consistency passes are applied. Isolated telecine anchors are rejected if they do not have enough coherent neighbors; small telecine clusters surrounded by 60i are reclassified; ambiguous frames inherit from local density and from the nearest anchor, with a bias consistent with why they were ambiguous. Finally, on sufficiently long 60i clusters, speculative IVTC verification is performed: slow TFM is applied on a subclip and the number of frames that remain combed is checked. A cluster is recovered as telecine only if IVTC cleans it and if average motion is sufficient; this avoids confusing static scenes with true 24p recovery.
 
 At the end, the pipeline normalizes everything into two operational classes. Only frames classified as `interlaced_60i` become `video_bob`; everything else enters the `film` branch. The framemap is rewritten with this binary choice and grouped into contiguous segments. In bob segments, exact source indices are preserved, because TDecimate may have skipped source frames inside the same visual area and the pipeline must not reinsert wrong frames.
+
+The `--bob-chapters` and `--bob-range` overrides operate at this point: they do not change classifier metrics, but replace the final decision inside user-selected ranges. They are intended for editorially known cases, such as endings that should always remain 60p, and should be preferred over global heuristics when the correct choice depends on episode structure.
 
 Dedup works only on film segments. It reconstructs the same decimated stream that will be used during encode, compares consecutive film frames, and groups duplicate runs up to the configured limit. If it finds, for example, a 4-in-1 run, it keeps a single video frame but extends timing through timecodes. This way the visual content is not repeated unnecessarily, while duration remains locked to the source.
 

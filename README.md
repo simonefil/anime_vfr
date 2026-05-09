@@ -66,8 +66,10 @@ anime_vfr.py source [opzioni]
 | `--report`              | Analizza MKV gia' prodotti leggendo i timestamps_v2; non esegue la pipeline.               |
 | `--analyze-only`        | Esegue analisi, classificazione, dedup, timecode e VPY, ma salta encode/mux.               |
 | `--bob`                 | Forza tutto il titolo a 60p bob e salta TIVTC/classificatore/dedup.                        |
-| `--progressive-dedup`   | Deduplica una sorgente gia' progressiva senza TIVTC/classificatore/bob.                    |
-| `--dedup`               | Abilita il dedup sui segmenti film della pipeline ibrida.                                  |
+| `--bob-chapters LIST`   | Forza a 60p bob uno o piu' capitoli, es. `4` o `4,5,6`.                                    |
+| `--bob-range LIST`      | Forza a 60p bob uno o piu' range temporali, es. `22:30-23:50`.                             |
+| `--progressive-dedup [N]` | Deduplica una sorgente gia' progressiva; `N` opzionale limita il run massimo.             |
+| `--dedup [N]`           | Abilita il dedup sui segmenti film; `N` opzionale limita il run massimo.                   |
 | `--output PATH`         | Cartella di output; se specificata mantiene il nome del file sorgente.                     |
 | `--work-dir PATH`       | Cartella di lavoro; se omessa usa `<output>\work`.                                         |
 | `--keep-work`           | Conserva i file intermedi invece di pulire la work dir a fine elaborazione.                |
@@ -111,23 +113,38 @@ Forza l'intero titolo a 60p bob. E' utile quando sai gia' che la sorgente e' int
 python anime_vfr.py "C:\video\episodio.mkv" --bob
 ```
 
+### `--bob-chapters` e `--bob-range`
+
+Forzano a 60p bob solo parti specifiche del titolo, lasciando il resto alla classificazione automatica. Servono quando una sezione e' nota a priori come movimento interlacciato reale, per esempio ending con credits o scroll verticali che devono rimanere fluidi. `--bob-chapters` usa indici capitolo 1-based letti dal MKV sorgente; `--bob-range` usa range temporali manuali nel formato `START-END`, separati da virgola.
+
+Questi override vengono applicati dopo il classificatore e prima della segmentazione finale. Non usano la timeline decimata: i frame del range vengono forzati a `video_bob` sulla timeline sorgente, quindi ogni frame sorgente genera due frame output e i timecode dividono in due la durata reale del frame. Sono mutuamente esclusivi con `--bob`, `--progressive-dedup` e `--report`.
+
+```powershell
+python anime_vfr.py "C:\video\episodio.mkv" --bob-chapters 4
+python anime_vfr.py "C:\video\episodio.mkv" --bob-chapters 4,5,6
+python anime_vfr.py "C:\video\episodio.mkv" --bob-range 22:30-23:50
+python anime_vfr.py "C:\video\episodio.mkv" --bob-range 22:30-23:50,10:00-10:20
+```
+
 ### `--progressive-dedup`
 
-Usa solo la parte dedup/timecode su una sorgente gia' progressiva. Salta TIVTC, classificatore e bob: ogni frame sorgente viene trattato come frame progressivo valido, poi i frame visivamente duplicati vengono rimossi e la loro durata viene trasferita ai timecode VFR.
+Usa solo la parte dedup/timecode su una sorgente gia' progressiva. Salta TIVTC, classificatore e bob: ogni frame sorgente viene trattato come frame progressivo valido, poi i frame visivamente duplicati vengono rimossi e la loro durata viene trasferita ai timecode VFR. Il valore opzionale `N` indica quanti frame consecutivi possono essere compattati al massimo; se scrivi solo `--progressive-dedup`, viene usato `N=2`.
 
 Questa modalita' serve per sorgenti che non hanno bisogno di IVTC o deinterlace, ma contengono hold/duplicati reali che si vogliono compattare in VFR. Non e' adatta a sorgenti interlacciate o telecinate non gia' risolte.
 
 ```powershell
 python anime_vfr.py "C:\video\progressivo.mkv" --progressive-dedup --analyze-only
+python anime_vfr.py "C:\video\progressivo.mkv" --progressive-dedup 4 --analyze-only
 python anime_vfr.py "C:\video\progressivo.mkv" --progressive-dedup --output "D:\encoded"
 ```
 
 ### `--dedup`
 
-Abilita il dedup sui segmenti film della pipeline ibrida. Senza questo flag, la pipeline fa IVTC, classificazione 24/60, bob delle sezioni interlacciate reali e generazione dei timecode VFR, ma conserva tutti i frame film decimati. `--dedup` serve quando vuoi compattare hold e duplicati visivi trasferendone la durata ai timecode VFR.
+Abilita il dedup sui segmenti film della pipeline ibrida. Senza questo flag, la pipeline fa IVTC, classificazione 24/60, bob delle sezioni interlacciate reali e generazione dei timecode VFR, ma conserva tutti i frame film decimati. `--dedup` serve quando vuoi compattare hold e duplicati visivi trasferendone la durata ai timecode VFR. Il valore opzionale `N` indica quanti frame consecutivi possono essere compattati al massimo; se scrivi solo `--dedup`, viene usato `N=2`.
 
 ```powershell
 python anime_vfr.py "C:\video\episodio.mkv" --dedup
+python anime_vfr.py "C:\video\episodio.mkv" --dedup 4
 ```
 
 ### `--output` e `--work-dir`
@@ -217,6 +234,8 @@ Il solo pattern non basta. La pipeline misura anche il movimento dei campi e un 
 Dopo la classificazione iniziale vengono applicate passate di coerenza. Le ancore telecine isolate vengono scartate se non hanno abbastanza vicini coerenti; i piccoli cluster telecine circondati da 60i vengono riclassificati; i frame ambigui ereditano dalla densita' locale e dall'ancora piu' vicina, con un bias coerente con il motivo per cui erano ambigui. Infine, sui cluster 60i abbastanza lunghi viene fatta una verifica IVTC speculativa: si applica TFM lento su una subclip e si controlla quanti frame restano combed. Un cluster viene recuperato come telecine solo se IVTC lo pulisce e se il movimento medio e' sufficiente; questo evita di confondere scene statiche con vero recupero 24p.
 
 Alla fine la pipeline normalizza in due classi operative. Solo i frame classificati `interlaced_60i` diventano `video_bob`; tutto il resto entra nel ramo `film`. Il framemap viene riscritto con questa scelta binaria e raggruppato in segmenti contigui. Nei segmenti bob vengono conservati gli indici sorgente esatti, perche' TDecimate puo' aver saltato frame sorgente dentro una stessa zona visiva e non bisogna reinserire frame sbagliati.
+
+Gli override `--bob-chapters` e `--bob-range` intervengono in questo punto: non cambiano le metriche del classificatore, ma sostituiscono la decisione finale nei range scelti dall'utente. Sono pensati per casi editorialmente noti, come ending sempre da tenere a 60p, e vanno preferiti a euristiche globali quando la scelta dipende dalla struttura dell'episodio.
 
 Il dedup lavora solo sui segmenti film. Ricostruisce lo stesso stream decimato che verra' usato nell'encode, confronta frame film consecutivi e raggruppa run di duplicati fino al limite configurato. Se trova, per esempio, una run 4-in-1, tiene un solo frame video ma allunga il timing tramite timecode. In questo modo il contenuto visivo non viene ripetuto inutilmente, ma la durata resta agganciata alla sorgente.
 

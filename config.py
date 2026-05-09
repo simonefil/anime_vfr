@@ -13,7 +13,7 @@ ENCODER_BIN = r"C:\Users\Simone\Programs\nvencc\NVEncC64.exe"
 ENCODER_PARAMS = (
     "--y4m -i - --codec hevc --preset p7 --tune uhq "
     "--lookahead 32 --bframes 5 --ref 6 --bref-mode middle "
-    "--aq --aq-temporal --cqp 8:10:12 --output-depth 10"
+    "--aq --aq-temporal --cqp 12:14:16 --output-depth 10"
 )
 
 # Parametri del classificatore multi-metrica. Definiscono il comportamento
@@ -31,6 +31,7 @@ MM_INHERITANCE_DOMINANCE = 1.5
 MM_VERIFY_MIN_SIZE = 50
 MM_VERIFY_COMBED_THRESH = 0.01
 MM_VERIFY_MIN_MOTION = 5
+MM_BOB_GAP_MAX = 30
 
 # Riconoscimento di scroll verticali interlacciati, tipici dei credit a testo
 # bianco su nero. La metrica cerca campi consecutivi che combaciano molto meglio
@@ -40,6 +41,9 @@ MM_VERTICAL_SCROLL_ENABLED = True
 MM_VERTICAL_SCROLL_DIRECT_MIN = 50
 MM_VERTICAL_SCROLL_BEST_MAX = 60
 MM_VERTICAL_SCROLL_IMPROVEMENT_MIN = 20
+MM_VERTICAL_SCROLL_SOFT_DIRECT_MIN = 35
+MM_VERTICAL_SCROLL_SOFT_BEST_MAX = 20
+MM_VERTICAL_SCROLL_SOFT_IMPROVEMENT_MIN = 25
 MM_VERTICAL_SCROLL_SHIFT = -1
 MM_VERTICAL_SCROLL_WINDOW = 31
 MM_VERTICAL_SCROLL_MIN_HITS = 8

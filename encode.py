@@ -39,9 +39,14 @@ def get_color_flags(source_path, is_ffmpeg):
     result = subprocess.run([MEDIAINFO, "--Output=JSON", str(source_path)], capture_output=True, text=True)
     info = json.loads(result.stdout)
     vtrack = next((t for t in info["media"]["track"] if t["@type"] == "Video"), {})
-    matrix = _MATRIX_MAP.get(vtrack.get("matrix_coefficients", ""))
-    primaries = _PRIMARIES_MAP.get(vtrack.get("colour_primaries", ""))
-    transfer = _TRANSFER_MAP.get(vtrack.get("transfer_characteristics", ""))
+    matrix_raw = vtrack.get("matrix_coefficients", "")
+    primaries_raw = vtrack.get("colour_primaries", "")
+    transfer_raw = vtrack.get("transfer_characteristics", "")
+    matrix = _MATRIX_MAP.get(matrix_raw)
+    primaries = _PRIMARIES_MAP.get(primaries_raw)
+    transfer = _TRANSFER_MAP.get(transfer_raw)
+    if matrix_raw == "BT.601" and (primaries_raw == "BT.601 PAL" or transfer_raw == "BT.470 System B/G"):
+        matrix = "bt470bg"
     if not any([matrix, primaries, transfer]):
         return ""
     if is_ffmpeg:
