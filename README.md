@@ -107,7 +107,7 @@ python anime_vfr.py "C:\video\episodio.mkv" --analyze-only > analisi.txt
 
 ### `--bob`
 
-Forza l'intero titolo a 60p bob. E' utile quando sai gia' che la sorgente e' interlacciata reale e non vuoi tentare recupero film. In questa modalita' non vengono eseguiti TFM/TDecimate, classificatore e dedup.
+Forza l'intero titolo a 60p bob. E' utile quando sai gia' che la sorgente e' interlacciata reale e non vuoi tentare recupero film. In questa modalita' non vengono eseguiti TFM/TDecimate, classificatore e dedup. Il mux finale viene scritto come CFR `60000/1001`, senza timestamps v2, per evitare che i PTS sorgente quantizzati facciano apparire il bob globale come VFR.
 
 ```powershell
 python anime_vfr.py "C:\video\episodio.mkv" --bob
@@ -239,11 +239,11 @@ Gli override `--bob-chapters` e `--bob-range` intervengono in questo punto: non 
 
 Il dedup lavora solo sui segmenti film. Ricostruisce lo stesso stream decimato che verra' usato nell'encode, confronta frame film consecutivi e raggruppa run di duplicati fino al limite configurato. Se trova, per esempio, una run 4-in-1, tiene un solo frame video ma allunga il timing tramite timecode. In questo modo il contenuto visivo non viene ripetuto inutilmente, ma la durata resta agganciata alla sorgente.
 
-I timecode finali sono generati dalla timeline sorgente e dalla segmentazione. Nei segmenti film viene scritto un timestamp per ogni frame decimato tenuto; con dedup il timestamp successivo avanza della durata rappresentata dalla run. Nei segmenti bob ogni frame sorgente genera due frame output, quindi la durata sorgente viene divisa in due. L'ultimo timestamp viene chiuso usando la durata stimata dai timestamps sorgente, non un framerate teorico fisso.
+I timecode finali sono generati dalla timeline sorgente e dalla segmentazione. Nei segmenti film viene scritto un timestamp per ogni frame decimato tenuto; con dedup il timestamp successivo avanza della durata rappresentata dalla run. Nei segmenti bob della pipeline ibrida ogni frame sorgente genera due frame output, quindi la durata sorgente viene divisa in due. L'ultimo timestamp viene chiuso usando la durata stimata dai timestamps sorgente, non un framerate teorico fisso. La modalita' `--bob` globale fa eccezione: genera un output CFR `60000/1001` e non muxa timestamps v2.
 
-Il VPY finale costruisce solo i rami necessari. Se ci sono segmenti film, crea il ramo TFM/TDecimate e applica Vinverse sui residui combed. Se ci sono segmenti 60p, crea il ramo QTempGaussMC con NNEDI3 OpenCL. I segmenti vengono poi assemblati con `core.std.Splice`. `AssumeFPS` nel VPY e' solo un tag tecnico per lo stream; il timing reale nel MKV finale e' determinato dai timecode Matroska muxati.
+Il VPY finale costruisce solo i rami necessari. Se ci sono segmenti film, crea il ramo TFM/TDecimate e applica Vinverse sui residui combed. Se ci sono segmenti 60p, crea il ramo QTempGaussMC con NNEDI3 OpenCL. I segmenti vengono poi assemblati con `core.std.Splice`. `AssumeFPS` nel VPY e' solo un tag tecnico per lo stream nella pipeline VFR; in `--bob` globale viene impostato a `60000/1001` e diventa coerente con il mux CFR.
 
-In modalita' normale `VSPipe` invia Y4M all'encoder configurato, poi `mkvmerge` muxa video, timecode VFR, audio e sottotitoli sorgenti. In `--analyze-only` la pipeline si ferma prima dell'encode ma produce comunque il report tecnico su standard output. In `--report`, invece, non viene rieseguita nessuna decisione: si misura soltanto il file finale gia' prodotto.
+In modalita' normale `VSPipe` invia Y4M all'encoder configurato, poi `mkvmerge` muxa video, timecode VFR, audio e sottotitoli sorgenti. In `--bob` globale `mkvmerge` usa invece `--default-duration 0:60000/1001fps`. In `--analyze-only` la pipeline si ferma prima dell'encode ma produce comunque il report tecnico su standard output. In `--report`, invece, non viene rieseguita nessuna decisione: si misura soltanto il file finale gia' prodotto.
 
 ## Struttura del codice
 

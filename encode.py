@@ -82,17 +82,31 @@ def encode(vs_script, encoded_video, color_flags=""):
         raise RuntimeError(f"Encoder fallito con codice {enc_proc.returncode}")
 
 
-def mux_final(encoded_video, source_path, timecodes_path, output_mkv, strip_audio, strip_sub, audio_range=None):
-    """Muxa video encodato, timecode VFR e tracce audio/sottotitoli sorgenti."""
+def mux_final(
+    encoded_video,
+    source_path,
+    timecodes_path,
+    output_mkv,
+    strip_audio,
+    strip_sub,
+    audio_range=None,
+    default_duration=None,
+):
+    """Muxa video encodato e tracce sorgenti, usando timecode VFR o durata CFR."""
     cmd = [
         MKVMERGE,
         "--output", str(output_mkv),
-        "--timestamps", f"0:{timecodes_path}",
+    ]
+    if timecodes_path is not None:
+        cmd.extend(["--timestamps", f"0:{timecodes_path}"])
+    if default_duration is not None:
+        cmd.extend(["--default-duration", f"0:{default_duration}"])
+    cmd.extend([
         "--no-audio",
         "--no-subtitles",
         "--no-chapters",
         str(encoded_video),
-    ]
+    ])
     if audio_range is not None:
         ss_ts, to_ts = audio_range
         trimmed_av = Path(encoded_video).parent / "trimmed_av.mkv"

@@ -764,11 +764,13 @@ def run_multimetric_classification(source_path, work_dir, tfm_path):
 
 
 def generate_pass2b_script(source_path, tfm_path, stats_path, segments, script_path, resize_w, resize_h,
-                           additional_vpy=None, frame_range=None, progressive_source=False):
+                           additional_vpy=None, frame_range=None, progressive_source=False,
+                           assume_fps_num=30000, assume_fps_den=1001):
     # Genera lo script VPY che assembla il clip VFR finale.
     # Il ramo decimato produce i frame film post-IVTC e applica Vinverse sui
     # residui combed. Il ramo bob produce i frame 60p per i segmenti 60i.
-    # AssumeFPS e' solo un tag tecnico: il timing reale viene dai timecode MKV.
+    # AssumeFPS e' solo un tag tecnico nella pipeline VFR; in --bob globale
+    # viene impostato a 60000/1001 per combaciare con il mux CFR.
     source_esc = str(source_path).replace("\\", "\\\\")
     dummy_path = Path(script_path).parent / f"{Path(script_path).stem}_dummy_tc.txt"
     need_decimated = any(s["type"] == "film" for s in segments)
@@ -852,7 +854,7 @@ bobbed = core.resize.Bicubic(bobbed, format=vs.YUV420P10)
     if frame_range is not None:
         script += f'clip = clip[{frame_range[0]}:{frame_range[1]}]\n'
 
-    script += '''clip = core.std.AssumeFPS(clip, fpsnum=30000, fpsden=1001)
+    script += f'''clip = core.std.AssumeFPS(clip, fpsnum={assume_fps_num}, fpsden={assume_fps_den})
 clip.set_output(0)
 '''
     with open(script_path, "w", encoding="utf-8") as f:
@@ -1084,8 +1086,10 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
         print(f"  Frame range: {fr_start}-{fr_end} ({total_out} frame)")
 
     vpy_path = work_dir / f"{stem}_pass2b.vpy"
+    assume_fps_num = 60000 if bob else 30000
     generate_pass2b_script(source_path, tfm_path, stats_path, segments, vpy_path, resize_w, resize_h,
-                           additional_vpy, frame_range, progressive_source=progressive_dedup)
+                           additional_vpy, frame_range, progressive_source=progressive_dedup,
+                           assume_fps_num=assume_fps_num, assume_fps_den=1001)
 
     if analyze_only:
         if progressive_dedup:
@@ -1096,7 +1100,7 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
         print(f"  Analyze-only: salto encode/mux. VPY: {vpy_path.name}, TC: {tc_final.name}")
         return {
             "name": output_path.name,
-            "mode": "progressive_dedup" if progressive_dedup else "hybrid",
+            "mode": "bob" if bob else ("progressive_dedup" if progressive_dedup else "hybrid"),
             "source_frames": entries[-1][1] + 1 if entries else 0,
             "film_frames_24": film_out,
             "video_frames_60": bob_out,
@@ -1115,7 +1119,18 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
         print(f"  Color tags: {color_flags}")
     encode(vpy_path, encoded_path, color_flags)
 
-    mux_final(encoded_path, source_path, tc_final, output_path, strip_audio, strip_sub, audio_range)
+    mux_timecodes = None if bob else tc_final
+    default_duration = "60000/1001fps" if bob else None
+    mux_final(
+        encoded_path,
+        source_path,
+        mux_timecodes,
+        output_path,
+        strip_audio,
+        strip_sub,
+        audio_range,
+        default_duration=default_duration,
+    )
 
     if encoded_path.exists():
         encoded_path.unlink()
@@ -1123,7 +1138,7 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
 
     return {
         "name": output_path.name,
-        "mode": "progressive_dedup" if progressive_dedup else "hybrid",
+        "mode": "bob" if bob else ("progressive_dedup" if progressive_dedup else "hybrid"),
         "source_frames": entries[-1][1] + 1 if entries else 0,
         "film_frames_24": film_out,
         "video_frames_60": bob_out,
