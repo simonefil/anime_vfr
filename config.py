@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """Configurazione statica di binari esterni e parametri di analisi."""
 
-MKVMERGE = r"C:\Binari\mkvmerge.exe"
-MKVEXTRACT = r"C:\Binari\mkvextract.exe"
-VSPIPE = r"C:\Users\Simone\AppData\Local\Programs\Vapourkit\data\vapoursynth-portable\VSPipe.exe"
-PYTHON_BIN = r"C:\Users\Simone\AppData\Local\Programs\Vapourkit\data\vapoursynth-portable\python.exe"
+MKVMERGE = "/opt/homebrew/bin/mkvmerge"
+MKVEXTRACT = "/opt/homebrew/bin/mkvextract"
+VSPIPE = "/opt/homebrew/bin/vspipe"
+PYTHON_BIN = "/opt/homebrew/bin/python3.14"
 
-MEDIAINFO = r"C:\Binari\MediaInfo.exe"
-FFMPEG = r"C:\Binari\ffmpeg.exe"
+MEDIAINFO = "/opt/homebrew/bin/mediainfo"
+FFMPEG = "/opt/homebrew/bin/ffmpeg"
 
 ENCODER_BIN = r"C:\Users\Simone\Programs\nvencc\NVEncC64.exe"
 ENCODER_PARAMS = (

@@ -18,14 +18,14 @@ Prima di eseguire lo script, apri `config.py` e adatta i path dei binari alla tu
 
 I parametri di compressione inclusi sono solo un preset operativo di esempio. Devi verificarli e modificarli in base all'encoder scelto, alla GPU/CPU disponibile e al livello qualitativo desiderato. In particolare, se non usi `NVEncC`, devi cambiare sia `ENCODER_BIN` sia `ENCODER_PARAMS` con una riga compatibile con il tuo encoder.
 
-Assicurati che `python` sia il Python dell'ambiente VapourSynth, cioe' quello in grado di importare `vapoursynth`. Servono: Python packages `numpy`, `vsdeinterlace`, `vsaa`, `vstools`, `vskernels` e relative dipendenze; plugin VapourSynth BestSource, TIVTC, Vinverse, Sneedif/NNEDI3 OpenCL e i plugin richiesti da `QTempGaussMC` come MVTools/RGTools/RemoveGrain o equivalenti della propria distribuzione; binari esterni `VSPipe`, `mkvmerge`, `mkvextract`, `MediaInfo`, `ffmpeg`; encoder video compatibile con input Y4M da pipe, ad esempio `ffmpeg`, Rigaya `NVEncC` per NVIDIA NVENC, Rigaya `QSVEncC` per Intel Quick Sync, Rigaya `VCEEncC` per AMD VCE/VCN/AMF, oppure Rigaya `rkmppenc` per Rockchip MPP. I path e i parametri dell'encoder si configurano in `config.py`.
+Assicurati che `python` sia il Python dell'ambiente VapourSynth, cioe' quello in grado di importare `vapoursynth`. Servono: Python packages `numpy`, `vsdeinterlace`, `vsaa`, `vstools`, `vskernels` e relative dipendenze; plugin VapourSynth BestSource, TIVTC, Vinverse, fmtconv/fmtc, Sneedif/NNEDI3 OpenCL e i plugin richiesti da `QTempGaussMC` come MVTools/RGTools/RemoveGrain o equivalenti della propria distribuzione; binari esterni `VSPipe`, `mkvmerge`, `mkvextract`, `MediaInfo`, `ffmpeg`; encoder video compatibile con input Y4M da pipe, ad esempio `ffmpeg`, Rigaya `NVEncC` per NVIDIA NVENC, Rigaya `QSVEncC` per Intel Quick Sync, Rigaya `VCEEncC` per AMD VCE/VCN/AMF, oppure Rigaya `rkmppenc` per Rockchip MPP. I path e i parametri dell'encoder si configurano in `config.py`.
 
 Verifiche minime:
 
 ```powershell
 python -m pip install numpy
 python -c "import vapoursynth as vs; import numpy; print(vs.__version__)"
-python -c "import vapoursynth as vs; c=vs.core; print(hasattr(c,'bs'), hasattr(c,'tivtc'), hasattr(c,'vinverse'), hasattr(c,'sneedif'))"
+python -c "import vapoursynth as vs; c=vs.core; print(hasattr(c,'bs'), hasattr(c,'tivtc'), hasattr(c,'vinverse'), hasattr(c,'fmtc'), hasattr(c,'sneedif'))"
 python -c "from vsdeinterlace.qtgmc import QTempGaussMC; from vsaa import NNEDI3; print(NNEDI3(opencl=True)._deinterlacer_function)"
 ```
 
@@ -50,6 +50,7 @@ Con `vsaa.NNEDI3(opencl=True)` il wrapper seleziona il backend OpenCL `core.lazy
 cd C:\percorso\anime_vfr
 python anime_vfr.py "C:\video\episodio.mkv" --analyze-only
 python anime_vfr.py "C:\video\episodio.mkv" --output "D:\encoded"
+python anime_vfr.py "C:\video\episodio.mkv" --resize 768x576 --yuv444
 ```
 
 ## Parametri
@@ -70,6 +71,8 @@ anime_vfr.py source [opzioni]
 | `--bob-range LIST`      | Forza a 60p bob uno o piu' range temporali, es. `22:30-23:50`.                             |
 | `--progressive-dedup [N]` | Deduplica una sorgente gia' progressiva; `N` opzionale limita il run massimo.             |
 | `--dedup [N]`           | Abilita il dedup sui segmenti film; `N` opzionale limita il run massimo.                   |
+| `--resize WIDTHxHEIGHT` | Ridimensiona l'output alla risoluzione esatta indicata, es. `768x576`.                     |
+| `--yuv444`              | Produce output video `YUV444P10` invece del default `YUV420P10`.                           |
 | `--output PATH`         | Cartella di output; se specificata mantiene il nome del file sorgente.                     |
 | `--work-dir PATH`       | Cartella di lavoro; se omessa usa `<output>\work`.                                         |
 | `--keep-work`           | Conserva i file intermedi invece di pulire la work dir a fine elaborazione.                |
@@ -147,6 +150,30 @@ python anime_vfr.py "C:\video\episodio.mkv" --dedup
 python anime_vfr.py "C:\video\episodio.mkv" --dedup 4
 ```
 
+### `--resize`
+
+Ridimensiona l'output alla risoluzione esatta indicata nel formato `WIDTHxHEIGHT`.
+
+```powershell
+python anime_vfr.py "C:\video\episodio.mkv" --resize 768x576
+python anime_vfr.py "C:\video\episodio.mkv" --resize 720x540
+```
+
+Il valore non viene calcolato automaticamente dal SAR: se vuoi un output 4:3 a pixel quadrati partendo da un DVD NTSC `720x480 SAR 8:9`, devi passare tu una risoluzione 4:3, per esempio `640x480`, `720x540` o `768x576`. Quando `--resize` e' attivo, il mux finale non scrive flag PAR per la traccia video, perche' la risoluzione richiesta viene trattata come pixel quadrati.
+
+Il resize finale usa `fmtc.resample` con pass interno a 16 bit e ritorno a 10 bit. Questo evita il vecchio path basato su `core.resize` e mantiene coerenti resize, bitdepth e ricampionamento chroma.
+
+### `--yuv444`
+
+Produce output video `YUV444P10` invece del default `YUV420P10`.
+
+```powershell
+python anime_vfr.py "C:\video\episodio.mkv" --yuv444
+python anime_vfr.py "C:\video\episodio.mkv" --resize 768x576 --yuv444
+```
+
+La conversione a `YUV444P10` viene fatta con `fmtc` dopo il trattamento dei rami film/bob e dopo l'assemblaggio finale dei segmenti. Quindi avviene dopo TFM/TDecimate, Vinverse, QTGMC/bob ed eventuale resize di output. Se usi anche `--additional-vpy`, lo snippet riceve gia' `clip` in `YUV444P10`.
+
 ### `--output` e `--work-dir`
 
 `--output` sceglie dove scrivere gli MKV finali. Se viene specificato, il file finale mantiene esattamente il nome del sorgente. Se viene omesso, l'output viene scritto nella stessa cartella del sorgente con suffisso `_1`, cosi' il file originale non viene sovrascritto.
@@ -176,7 +203,7 @@ Quando lo snippet viene eseguito, esistono gia':
 
 - `import vapoursynth as vs`
 - `core = vs.core`
-- `clip`, cioe' il clip gia' assemblato dai segmenti 24p/60p, gia' ridimensionato a pixel quadrati e convertito in `YUV420P10`
+- `clip`, cioe' il clip gia' assemblato dai segmenti 24p/60p, gia' ridimensionato se hai usato `--resize`, e convertito in `YUV420P10` oppure in `YUV444P10` se hai usato `--yuv444`
 
 Lo snippet lavora sulla variabile `clip` e la riassegna. Un caso tipico e' azzerare il flag interlacciato residuo e forzare il tag CFR tecnico prima dei filtri:
 
@@ -223,7 +250,7 @@ python anime_vfr.py "C:\video\episodio.mkv" --strip-sub
 
 La pipeline non decide il framerate finale guardando soltanto l'output di TDecimate. TIVTC viene usato per costruire una timeline film coerente e per estrarre segnali utili, ma la decisione 24p/60p viene presa sui frame sorgente con un classificatore multi-metrica. Questo e' necessario sulle sorgenti anime miste: scene quasi statiche, pattern incompleti o frame combed isolati possono ingannare un singolo indicatore. La pipeline incrocia piu' segnali e alla fine riduce tutto a una scelta binaria: film oppure bob.
 
-Per prima cosa vengono letti metadati, SAR e timestamps_v2 della sorgente. I timestamps sorgente sono la base temporale: servono a generare i timecode finali e a chiudere correttamente anche l'ultimo segmento, evitando drift cumulativo rispetto all'audio. La risoluzione viene convertita a pixel quadrati mantenendo il display aspect ratio.
+Per prima cosa vengono letti metadati, SAR e timestamps_v2 della sorgente. I timestamps sorgente sono la base temporale: servono a generare i timecode finali e a chiudere correttamente anche l'ultimo segmento, evitando drift cumulativo rispetto all'audio. Se non specifichi `--resize`, la risoluzione campionata resta quella della sorgente e, quando necessario, il mux finale conserva il display aspect ratio tramite flag PAR. Se specifichi `--resize`, la pipeline produce esattamente la risoluzione richiesta e non scrive flag PAR per la traccia video.
 
 Il pass TIVTC iniziale produce le informazioni di match tra campi e decimazione. TFM cerca corrispondenze tra campi per recuperare i frame progressivi da materiale telecinato; TDecimate costruisce la timeline decimata. Durante il secondo pass viene creato un framemap che collega ogni frame della timeline decimata al frame sorgente da cui deriva. Questo collegamento e' essenziale: la classificazione lavora sulla sorgente, ma l'assemblaggio film lavora sulla timeline decimata.
 
@@ -241,7 +268,7 @@ Il dedup lavora solo sui segmenti film. Ricostruisce lo stesso stream decimato c
 
 I timecode finali sono generati dalla timeline sorgente e dalla segmentazione. Nei segmenti film viene scritto un timestamp per ogni frame decimato tenuto; con dedup il timestamp successivo avanza della durata rappresentata dalla run. Nei segmenti bob della pipeline ibrida ogni frame sorgente genera due frame output, quindi la durata sorgente viene divisa in due. L'ultimo timestamp viene chiuso usando la durata stimata dai timestamps sorgente, non un framerate teorico fisso. La modalita' `--bob` globale fa eccezione: genera un output CFR `60000/1001` e non muxa timestamps v2.
 
-Il VPY finale costruisce solo i rami necessari. Se ci sono segmenti film, crea il ramo TFM/TDecimate e applica Vinverse sui residui combed. Se ci sono segmenti 60p, crea il ramo QTempGaussMC con NNEDI3 OpenCL. I segmenti vengono poi assemblati con `core.std.Splice`. `AssumeFPS` nel VPY e' solo un tag tecnico per lo stream nella pipeline VFR; in `--bob` globale viene impostato a `60000/1001` e diventa coerente con il mux CFR.
+Il VPY finale costruisce solo i rami necessari. Se ci sono segmenti film, crea il ramo TFM/TDecimate e applica Vinverse sui residui combed. Se ci sono segmenti 60p, crea il ramo QTempGaussMC con NNEDI3 OpenCL. Ogni ramo viene convertito a `YUV420P10` con `fmtc`; se `--resize` e' attivo, il resize viene fatto nello stesso pass `fmtc` del ramo. I segmenti vengono poi assemblati con `core.std.Splice`; solo dopo lo splice viene applicato `--yuv444`, sempre via `fmtc`. `AssumeFPS` nel VPY e' solo un tag tecnico per lo stream nella pipeline VFR; in `--bob` globale viene impostato a `60000/1001` e diventa coerente con il mux CFR.
 
 In modalita' normale `VSPipe` invia Y4M all'encoder configurato, poi `mkvmerge` muxa video, timecode VFR, audio e sottotitoli sorgenti. In `--bob` globale `mkvmerge` usa invece `--default-duration 0:60000/1001fps`. In `--analyze-only` la pipeline si ferma prima dell'encode ma produce comunque il report tecnico su standard output. In `--report`, invece, non viene rieseguita nessuna decisione: si misura soltanto il file finale gia' prodotto.
 
@@ -265,9 +292,11 @@ utils.py       helper condivisi
 - Il modello finale e' sempre binario: 24p film o 60p bob.
 - `--analyze-only` e' il modo corretto per validare una sorgente nuova prima dell'encode.
 - `--report` serve solo sui file gia' prodotti: misura i timestamps del MKV, non ripete la classificazione.
+- `--resize` imposta una risoluzione esatta; non calcola automaticamente il DAR dal SAR.
+- `--yuv444` viene applicato dopo Vinverse, bob, resize e assemblaggio segmenti.
 - Il dedup e' applicato solo ai segmenti film e modifica il numero di frame video, non la durata temporale.
 - `--progressive-dedup` applica lo stesso principio a sorgenti gia' progressive, senza classificazione 24/60.
-- Gli script `--additional-vpy` devono mantenere invariati numero e ordine dei frame.
+- Gli script `--additional-vpy` devono mantenere invariati numero e ordine dei frame; se passi `--yuv444`, ricevono `clip` gia' in `YUV444P10`.
 - Se cambi encoder, aggiorna insieme `ENCODER_BIN` e `ENCODER_PARAMS` in `config.py`.
 
 ## Licenza

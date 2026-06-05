@@ -64,11 +64,35 @@ def get_color_flags(source_path, is_ffmpeg):
     return " ".join(parts)
 
 
-def encode(vs_script, encoded_video, color_flags=""):
+def get_par_flags(sar_num, sar_den, is_ffmpeg):
+    """Mappa il sample aspect ratio sorgente sui flag dell'encoder selezionato."""
+    if sar_num == sar_den:
+        return ""
+    if is_ffmpeg:
+        return f"-vf setsar={sar_num}/{sar_den}"
+    return f"--sar {sar_num}:{sar_den}"
+
+
+def get_chroma_flags(output_yuv444, is_ffmpeg):
+    """Mappa il chroma output richiesto sui flag dell'encoder selezionato."""
+    if not output_yuv444:
+        return ""
+    if is_ffmpeg:
+        return "-pix_fmt yuv444p10le"
+    return "--output-csp yuv444"
+
+
+def encode(vs_script, encoded_video, color_flags="", par_flags="", chroma_flags=""):
     """Invia l'output Y4M di VapourSynth all'encoder configurato."""
     vspipe_cmd = [VSPIPE, "-c", "y4m", str(vs_script), "-"]
     is_ffmpeg = "ffmpeg" in ENCODER_BIN.lower()
-    params = ENCODER_PARAMS + (f" {color_flags}" if color_flags else "")
+    params = ENCODER_PARAMS
+    if color_flags:
+        params += f" {color_flags}"
+    if par_flags:
+        params += f" {par_flags}"
+    if chroma_flags:
+        params += f" {chroma_flags}"
     if is_ffmpeg:
         enc_cmd = [ENCODER_BIN] + params.split() + [str(encoded_video)]
     else:
@@ -91,6 +115,7 @@ def mux_final(
     strip_sub,
     audio_range=None,
     default_duration=None,
+    display_aspect_ratio=None,
 ):
     """Muxa video encodato e tracce sorgenti, usando timecode VFR o durata CFR."""
     cmd = [
@@ -101,6 +126,8 @@ def mux_final(
         cmd.extend(["--timestamps", f"0:{timecodes_path}"])
     if default_duration is not None:
         cmd.extend(["--default-duration", f"0:{default_duration}"])
+    if display_aspect_ratio is not None:
+        cmd.extend(["--aspect-ratio", f"0:{display_aspect_ratio}"])
     cmd.extend([
         "--no-audio",
         "--no-subtitles",

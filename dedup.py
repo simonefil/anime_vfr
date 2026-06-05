@@ -10,6 +10,12 @@ from config import MM_DEDUP_CAP, MM_DEDUP_THRESH
 from utils import box_max_16
 
 
+def _fmtc_to_yuv420p8(core, vs, clip):
+    clip = core.fmtc.bitdepth(clip, bits=16)
+    clip = core.fmtc.resample(clip, csp=vs.YUV420P16, kernel="spline16", cplaces="mpeg2", cplaced="mpeg2")
+    return core.fmtc.bitdepth(clip, bits=8)
+
+
 def run_dedup_detection(source_path, work_dir, tfm_path, stats_path, segments,
                         threshold=None, cap=None):
     """Rileva run di duplicati nei segmenti film e aggiunge kept_frames."""
@@ -63,7 +69,7 @@ def run_progressive_dedup_detection(source_path, segments, threshold=None, cap=N
 
     clip = core.bs.VideoSource(str(source_path), threads=0)
     clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=0)
-    clip = core.resize.Bicubic(clip, format=vs.YUV420P8)
+    clip = _fmtc_to_yuv420p8(core, vs, clip)
     return _run_dedup_on_clip(clip, segments, n_threads, threshold, cap)
 
 
@@ -130,9 +136,9 @@ def _build_decimated_clip(core, vs, source_path, tfm_path, stats_path, mkvout_pa
     """Costruisce lo stesso stream film decimato che verra' usato dal pass2b."""
     clip = core.bs.VideoSource(str(source_path), threads=0)
     clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=2)
-    clip = core.resize.Bicubic(clip, format=vs.YUV420P8)
+    clip = _fmtc_to_yuv420p8(core, vs, clip)
     decimated = core.tivtc.TFM(clip, order=1, cthresh=8, input=str(tfm_path))
-    decimated_vinv = core.vinverse.vinverse(decimated, sstr=2.7, amnt=255, scl=0.25, uv=3, thr=32)
+    decimated_vinv = core.vinverse.vinverse(decimated, sstr=2.7, amnt=255, scl=0.25)
     decimated = core.std.ModifyFrame(
         decimated,
         [decimated, decimated_vinv],

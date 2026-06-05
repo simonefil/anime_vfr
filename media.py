@@ -44,15 +44,6 @@ def get_video_frame_count(source):
     return int(frame_count) if frame_count else None
 
 
-def calc_square_pixel_res(w, h, sar_num, sar_den):
-    """Converte la risoluzione campionata in risoluzione a pixel quadrati."""
-    if sar_num == sar_den:
-        return w, h
-    dar = (w * sar_num) / (h * sar_den)
-    square_w = round(h * dar / 2) * 2
-    return square_w, h
-
-
 def extract_source_timecodes(source_path, output_path):
     """Estrae i timestamps_v2 della traccia video da un MKV sorgente."""
     cmd = [MKVEXTRACT, str(source_path), "timestamps_v2", f"0:{output_path}"]
