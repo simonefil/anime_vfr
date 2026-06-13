@@ -66,9 +66,10 @@ anime_vfr.py source [options]
 | `source`                | Source MKV file, or folder containing MKV files.                                                     |
 | `--report`              | Analyzes already produced MKV files by reading timestamps_v2; does not run the pipeline.             |
 | `--analyze-only`        | Runs analysis, classification, optional dedup, timecodes and VPY generation, but skips encode/mux.   |
-| `--bob`                 | Forces the whole title to 60p bob and skips TIVTC/classifier/dedup.                                  |
+| `--bob [NUM/DEN]`       | Forces the whole title to CFR bob and skips TIVTC/classifier/dedup; default `60000/1001`.            |
 | `--bob-chapters LIST`   | Forces one or more chapters to 60p bob, for example `4` or `4,5,6`.                                   |
 | `--bob-range LIST`      | Forces one or more time ranges to 60p bob, for example `22:30-23:50`.                                 |
+| `--field-order tff|bff` | Sets the field order used by TFM/QTGMC; default is `tff`.                                             |
 | `--progressive-dedup [N]` | Deduplicates an already progressive source; optional `N` limits the maximum duplicate run.          |
 | `--dedup [N]`           | Enables dedup on film segments; optional `N` limits the maximum duplicate run.                       |
 | `--resize WIDTHxHEIGHT` | Resizes output to the exact requested resolution, for example `768x576`.                              |
@@ -110,10 +111,13 @@ python anime_vfr.py "C:\video\episode.mkv" --analyze-only > analysis.txt
 
 ### `--bob`
 
-Forces the whole title to 60p bob. It is useful when you already know the source is truly interlaced and you do not want to attempt film recovery. In this mode TFM/TDecimate, the classifier, and dedup are not executed. The final mux is written as CFR `60000/1001`, without timestamps v2, so quantized source PTS do not make a global bob appear as VFR.
+Forces the whole title to CFR bob. It is useful when you already know the source is truly interlaced and you do not want to attempt film recovery. In this mode TFM/TDecimate, the classifier, and dedup are not executed. The final mux is written as CFR using the FPS ratio passed to `--bob`, without timestamps v2, so quantized source PTS do not make a global bob appear as VFR.
+
+When omitted, the value keeps the historical `60000/1001` default. The optional value must use the `NUM/DEN` format; for PAL 25i full-bob sources use `50/1`.
 
 ```powershell
 python anime_vfr.py "C:\video\episode.mkv" --bob
+python anime_vfr.py "C:\video\pal_episode.mkv" --bob 50/1
 ```
 
 ### `--bob-chapters` and `--bob-range`
@@ -121,6 +125,8 @@ python anime_vfr.py "C:\video\episode.mkv" --bob
 Force only selected parts of the title to 60p bob, while the rest of the episode remains controlled by automatic classification. They are meant for sections known in advance to contain real interlaced motion, for example endings with credits or vertical scrolls that must stay fluid. `--bob-chapters` uses 1-based chapter indices read from the source MKV; `--bob-range` uses manual `START-END` time ranges separated by commas.
 
 These overrides are applied after the classifier and before final segmentation. They do not use the decimated timeline: frames in the selected range are forced to `video_bob` on the source timeline, so each source frame generates two output frames and timecodes split the real source-frame duration in half. They are mutually exclusive with `--bob`, `--progressive-dedup`, and `--report`.
+
+`--field-order` controls the field order used by interlaced parts. The default is `tff`, matching the historical behavior. Use `--field-order bff` only for verified bottom-field-first sources.
 
 ```powershell
 python anime_vfr.py "C:\video\episode.mkv" --bob-chapters 4
@@ -266,11 +272,11 @@ The `--bob-chapters` and `--bob-range` overrides operate at this point: they do 
 
 Dedup works only on film segments. It reconstructs the same decimated stream that will be used during encode, compares consecutive film frames, and groups duplicate runs up to the configured limit. If it finds, for example, a 4-in-1 run, it keeps a single video frame but extends timing through timecodes. This way the visual content is not repeated unnecessarily, while duration remains locked to the source.
 
-Final timecodes are generated from the source timeline and segmentation. In film segments, one timestamp is written for each kept decimated frame; with dedup, the next timestamp advances by the duration represented by the run. In hybrid-pipeline bob segments, each source frame generates two output frames, so the source duration is split in two. The last timestamp is closed using duration estimated from source timestamps, not a fixed theoretical framerate. Global `--bob` is the exception: it generates CFR `60000/1001` output and does not mux timestamps v2.
+Final timecodes are generated from the source timeline and segmentation. In film segments, one timestamp is written for each kept decimated frame; with dedup, the next timestamp advances by the duration represented by the run. In hybrid-pipeline bob segments, each source frame generates two output frames, so the source duration is split in two. The last timestamp is closed using duration estimated from source timestamps, not a fixed theoretical framerate. Global `--bob` is the exception: it generates CFR output at the FPS ratio passed to `--bob` and does not mux timestamps v2.
 
-The final VPY builds only the required branches. If there are film segments, it creates the TFM/TDecimate branch and applies Vinverse on residual combed frames. If there are 60p segments, it creates the QTempGaussMC branch with NNEDI3 OpenCL. Each branch is converted to `YUV420P10` with `fmtc`; if `--resize` is enabled, resizing is performed in the same branch-local `fmtc` pass. Segments are then assembled with `core.std.Splice`; only after the splice is `--yuv444` applied, also through `fmtc`. `AssumeFPS` in the VPY is only a technical stream tag in the VFR pipeline; in global `--bob` it is set to `60000/1001` and matches the CFR mux.
+The final VPY builds only the required branches. If there are film segments, it creates the TFM/TDecimate branch and applies Vinverse on residual combed frames. If there are bob/60p segments, it creates the QTempGaussMC branch with NNEDI3 OpenCL. Each branch is converted to `YUV420P10` with `fmtc`; if `--resize` is enabled, resizing is performed in the same branch-local `fmtc` pass. Segments are then assembled with `core.std.Splice`; only after the splice is `--yuv444` applied, also through `fmtc`. `AssumeFPS` in the VPY is only a technical stream tag in the VFR pipeline; in global `--bob` it is set to the requested FPS ratio and matches the CFR mux.
 
-In normal mode, `VSPipe` sends Y4M to the configured encoder, then `mkvmerge` muxes video, VFR timecodes, audio, and source subtitles. In global `--bob`, `mkvmerge` uses `--default-duration 0:60000/1001fps` instead. In `--analyze-only`, the pipeline stops before encode but still produces the technical report on standard output. In `--report`, however, no decision is rerun: it only measures the final already produced file.
+In normal mode, `VSPipe` sends Y4M to the configured encoder, then `mkvmerge` muxes video, VFR timecodes, audio, and source subtitles. In global `--bob`, `mkvmerge` uses `--default-duration` with the requested FPS ratio instead. In `--analyze-only`, the pipeline stops before encode but still produces the technical report on standard output. In `--report`, however, no decision is rerun: it only measures the final already produced file.
 
 ## Code Structure
 

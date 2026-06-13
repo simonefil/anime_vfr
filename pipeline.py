@@ -93,13 +93,25 @@ def fmtc_to_yuv420p8(core, vs, clip):
     return core.fmtc.bitdepth(clip, bits=8)
 
 
-def run_pass1(source_path, work_dir):
+def _field_order_settings(field_order):
+    tff = field_order == "tff"
+    return {
+        "tff": tff,
+        "fieldbased": 2 if tff else 1,
+        "tfm_order": 1 if tff else 0,
+        "suffix": "" if tff else "_bff",
+    }
+
+
+def run_pass1(source_path, work_dir, field_order="tff"):
     # TFM analizza il pulldown 3:2 tramite match tra campi. TDecimate mode=4 conta i pattern
     # di decimazione senza produrre output video. Genera stats + tfm per le pass successive.
     stem = source_path.stem
-    stats_path = work_dir / f"{stem}_stats.txt"
-    tfm_path = work_dir / f"{stem}_tfm.txt"
-    script_path = work_dir / f"{stem}_pass1.vpy"
+    field = _field_order_settings(field_order)
+    suffix = field["suffix"]
+    stats_path = work_dir / f"{stem}{suffix}_stats.txt"
+    tfm_path = work_dir / f"{stem}{suffix}_tfm.txt"
+    script_path = work_dir / f"{stem}{suffix}_pass1.vpy"
     source_esc = str(source_path).replace("\\", "\\\\")
     stats_esc = str(stats_path).replace("\\", "\\\\")
     tfm_esc = str(tfm_path).replace("\\", "\\\\")
@@ -107,9 +119,9 @@ def run_pass1(source_path, work_dir):
 core = vs.core
 {VPY_FMTC_HELPERS}
 clip = core.bs.VideoSource(r"{source_esc}")
-clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=2)
+clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval={field["fieldbased"]})
 clip = fmtc_to_yuv420p8(clip)
-clip = core.tivtc.TFM(clip, order=1, cthresh=8, output=r"{tfm_esc}")
+clip = core.tivtc.TFM(clip, order={field["tfm_order"]}, cthresh=8, output=r"{tfm_esc}")
 clip = core.tivtc.TDecimate(clip, mode=4, output=r"{stats_esc}")
 clip.set_output(0)
 '''
@@ -126,16 +138,18 @@ clip.set_output(0)
     return stats_path, tfm_path
 
 
-def run_pass2a(source_path, stats_path, tfm_path, work_dir):
+def run_pass2a(source_path, stats_path, tfm_path, work_dir, field_order="tff"):
     # Costruisce lo stream ibrido TIVTC usato come timeline decimata canonica.
     # Ogni frame output riceve _OrigFrameNum, cosi' le fasi successive possono
     # risalire al frame sorgente selezionato da TFM/TDecimate.
     # Viene eseguito in un sottoprocesso per isolare il ciclo get_frame() di VapourSynth
     # dallo stato del processo principale.
     stem = source_path.stem
-    tc_v1_path = work_dir / f"{stem}_tc_v1.txt"
-    framemap_path = work_dir / f"{stem}_framemap.txt"
-    mapper_script = work_dir / f"{stem}_mapper.py"
+    field = _field_order_settings(field_order)
+    suffix = field["suffix"]
+    tc_v1_path = work_dir / f"{stem}{suffix}_tc_v1.txt"
+    framemap_path = work_dir / f"{stem}{suffix}_framemap.txt"
+    mapper_script = work_dir / f"{stem}{suffix}_mapper.py"
 
     source_esc = str(source_path).replace("\\", "\\\\")
     stats_esc = str(stats_path).replace("\\", "\\\\")
@@ -147,7 +161,7 @@ def run_pass2a(source_path, stats_path, tfm_path, work_dir):
 core = vs.core
 {VPY_FMTC_HELPERS}
 clip = core.bs.VideoSource(r"{source_esc}")
-clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=2)
+clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval={field["fieldbased"]})
 clip = fmtc_to_yuv420p8(clip)
 
 def set_fn(n, f):
@@ -156,7 +170,7 @@ def set_fn(n, f):
     return fout
 clip = core.std.ModifyFrame(clip, clip, set_fn)
 
-clip = core.tivtc.TFM(clip, order=1, cthresh=8, input=r"{tfm_esc}")
+clip = core.tivtc.TFM(clip, order={field["tfm_order"]}, cthresh=8, input=r"{tfm_esc}")
 clip = core.tivtc.TDecimate(clip, mode=5, hybrid=2, vfrDec=1, input=r"{stats_esc}", tfmIn=r"{tfm_esc}", mkvOut=r"{tc_esc}")
 
 with open(r"{fm_esc}", "w") as f:
@@ -546,7 +560,7 @@ def _nearest_anchor_inheritance(classifications):
 
 
 def _speculative_ivtc_verification(source_clip, classifications, motion_arr, work_dir,
-                                   locked_60i_mask=None, log_prefix=""):
+                                  locked_60i_mask=None, log_prefix="", field_order="tff"):
     """Verifica se alcuni cluster 60i possono essere recuperati come 24p.
     Per ogni cluster sufficientemente lungo applica TFM speculativo e misura
     quanti frame restano combed sull'output.
@@ -558,6 +572,7 @@ def _speculative_ivtc_verification(source_clip, classifications, motion_arr, wor
     """
     import vapoursynth as vs
     core = vs.core
+    tfm_order = _field_order_settings(field_order)["tfm_order"]
 
     n_threads = core.num_threads
     runs = []
@@ -592,7 +607,7 @@ def _speculative_ivtc_verification(source_clip, classifications, motion_arr, wor
         n_verified += 1
         sub = source_clip[run["start"]:run["end"]+1]
         try:
-            matched = core.tivtc.TFM(sub, order=1, cthresh=8, slow=2)
+            matched = core.tivtc.TFM(sub, order=tfm_order, cthresh=8, slow=2)
             n_total = matched.num_frames
             n_combed = 0
             for fr in matched.frames(prefetch=n_threads):
@@ -615,7 +630,7 @@ def _speculative_ivtc_verification(source_clip, classifications, motion_arr, wor
     return new_cls
 
 
-def run_multimetric_classification(source_path, work_dir, tfm_path):
+def run_multimetric_classification(source_path, work_dir, tfm_path, field_order="tff"):
     """Esegue classificazione multi-metrica e verifica finale.
     Restituisce una lista con una classificazione per frame sorgente.
 
@@ -631,11 +646,13 @@ def run_multimetric_classification(source_path, work_dir, tfm_path):
     n_threads = os.cpu_count() or 16
     core.num_threads = n_threads
     print(f"  Analisi multi-metrica (FFT + ciclo + combed) — core.num_threads={n_threads}...")
+    field = _field_order_settings(field_order)
+    field_order_tff = field["tff"]
 
     # Decodifichiamo i frame sorgente in formato luma/chroma ridotto: le metriche
     # del classificatore lavorano sul piano luma e non richiedono profondita' elevata.
     clip = core.bs.VideoSource(str(source_path), threads=0)
-    clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=2)
+    clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=field["fieldbased"])
     clip = fmtc_to_yuv420p8(core, vs, clip)
     N_src = clip.num_frames
 
@@ -673,15 +690,17 @@ def run_multimetric_classification(source_path, work_dir, tfm_path):
             # Il confronto tra campi resta sequenziale perche' dipende dal frame precedente.
             top = arr[0::2].astype(np.int32)
             bot = arr[1::2].astype(np.int32)
+            first = top if field_order_tff else bot
+            second = bot if field_order_tff else top
             if prev_top is not None:
-                motion_arr[2*i]   = _box_max_16(np.abs(top - prev_top))
-                motion_arr[2*i+1] = _box_max_16(np.abs(bot - prev_bot))
-            if prev_field is not None and _is_vertical_scroll_hit(top, prev_field):
+                motion_arr[2*i] = _box_max_16(np.abs(first - (prev_top if field_order_tff else prev_bot)))
+                motion_arr[2*i+1] = _box_max_16(np.abs(second - (prev_bot if field_order_tff else prev_top)))
+            if prev_field is not None and _is_vertical_scroll_hit(first, prev_field):
                 vertical_scroll_hits[i] = 1
-            prev_field = top
-            if _is_vertical_scroll_hit(bot, prev_field):
+            prev_field = first
+            if _is_vertical_scroll_hit(second, prev_field):
                 vertical_scroll_hits[i] = 1
-            prev_field = bot
+            prev_field = second
             prev_top = top
             prev_bot = bot
             # Recuperiamo i risultati asincroni piu' vecchi per limitare la memoria pendente.
@@ -752,6 +771,7 @@ def run_multimetric_classification(source_path, work_dir, tfm_path):
         work_dir,
         locked_60i_mask=locked_60i_mask,
         log_prefix="  ",
+        field_order=field_order,
     )
     for i in range(N_src):
         if pre_verify[i] == "interlaced_60i" and classifications[i] == "telecine_24p":
@@ -794,18 +814,21 @@ def run_multimetric_classification(source_path, work_dir, tfm_path):
 def generate_pass2b_script(source_path, tfm_path, stats_path, segments, script_path, resize_w, resize_h,
                            additional_vpy=None, frame_range=None, progressive_source=False,
                            assume_fps_num=30000, assume_fps_den=1001, resize_enabled=False,
-                           output_yuv444=False):
+                           output_yuv444=False, field_order="tff"):
     # Genera lo script VPY che assembla il clip VFR finale.
     # Il ramo decimato produce i frame film post-IVTC e applica Vinverse sui
-    # residui combed. Il ramo bob produce i frame 60p per i segmenti 60i.
+    # residui combed. Il ramo bob produce due frame progressivi per ogni frame
+    # sorgente nei segmenti interlacciati.
     # AssumeFPS e' solo un tag tecnico nella pipeline VFR; in --bob globale
-    # viene impostato a 60000/1001 per combaciare con il mux CFR.
+    # viene impostato al rapporto FPS richiesto per combaciare con il mux CFR.
     source_esc = str(source_path).replace("\\", "\\\\")
     dummy_path = Path(script_path).parent / f"{Path(script_path).stem}_dummy_tc.txt"
     need_decimated = any(s["type"] == "film" for s in segments)
     need_bob = any(s["type"] == "video_bob" for s in segments)
     film_clip_name = "progressive" if progressive_source else "decimated"
-    fieldbased = 0 if progressive_source else 2
+    field = _field_order_settings(field_order)
+    field_order_tff = field["tff"]
+    fieldbased = 0 if progressive_source else field["fieldbased"]
     final_420_line = (
         f"{{name}} = fmtc_to_yuv420p10({{name}}, {resize_w}, {resize_h})\n"
         if resize_enabled
@@ -847,7 +870,7 @@ progressive = core.std.SetFrameProp(clip, prop="_FieldBased", intval=0)
         stats_esc = str(stats_path).replace("\\", "\\\\")
         dummy_esc = str(dummy_path).replace("\\", "\\\\")
         script += f'''
-decimated = core.tivtc.TFM(clip, order=1, cthresh=8, input=r"{tfm_esc}")
+decimated = core.tivtc.TFM(clip, order={field["tfm_order"]}, cthresh=8, input=r"{tfm_esc}")
 decimated_vinv = core.vinverse.vinverse(decimated, sstr=2.7, amnt=255, scl=0.25)
 decimated = core.std.ModifyFrame(decimated, [decimated, decimated_vinv], lambda n, f: f[1].copy() if f[0].props.get('_Combed', 0) else f[0].copy())
 decimated = core.tivtc.TDecimate(decimated, mode=5, hybrid=2, vfrDec=1, input=r"{stats_esc}", tfmIn=r"{tfm_esc}", mkvOut=r"{dummy_esc}")
@@ -857,7 +880,7 @@ decimated = core.tivtc.TDecimate(decimated, mode=5, hybrid=2, vfrDec=1, input=r"
         script += f'''
 from vsdeinterlace.qtgmc import QTempGaussMC
 from vsaa import NNEDI3
-bobbed = QTempGaussMC(clip, basic_bobber=NNEDI3(nsize=4, nns=4, qual=2, opencl=True), tff=True, basic_tr=3, final_tr=2, source_match_mode=QTempGaussMC.SourceMatchMode.TWICE_REFINED).deinterlace()
+bobbed = QTempGaussMC(clip, basic_bobber=NNEDI3(nsize=4, nns=4, qual=2, opencl=True), tff={field_order_tff}, basic_tr=3, final_tr=2, source_match_mode=QTempGaussMC.SourceMatchMode.TWICE_REFINED).deinterlace()
 {final_420_line.format(name="bobbed")}\
 '''
     for seg in segments:
@@ -990,6 +1013,29 @@ def _parse_resize_spec(value):
     return width, height
 
 
+def _parse_fps_ratio(value, option_name):
+    """Valida un rapporto FPS NUM/DEN passato da CLI, ad esempio 60000/1001."""
+    raw = value.strip()
+    if not raw:
+        raise ValueError(f"{option_name} richiede un rapporto FPS valido")
+
+    parts = raw.split("/", 1)
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        raise ValueError(f"{option_name} deve essere nel formato NUM/DEN, es. 60000/1001 o 50/1")
+
+    num = int(parts[0])
+    den = int(parts[1])
+
+    if num <= 0 or den <= 0:
+        raise ValueError(f"{option_name} deve essere > 0")
+    return num, den
+
+
+def _format_fps_ratio(fps_ratio):
+    num, den = fps_ratio
+    return f"{num}/{den}"
+
+
 def _bob_ranges_from_chapters(source_path, work_dir, chapters):
     """Estrae i range temporali dei capitoli da forzare a bob."""
     if not chapters:
@@ -1028,7 +1074,8 @@ def _apply_bob_time_overrides(classifications, src_tc_path, ranges):
 def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, additional_vpy=None,
                     frame_range=None, bob=False, analyze_only=False, progressive_dedup=False,
                     dedup_enabled=False, dedup_cap=None, bob_chapters=None, bob_ranges=None,
-                    resize_target=None, output_yuv444=False):
+                    resize_target=None, output_yuv444=False,
+                    field_order="tff", bob_fps=(60000, 1001)):
     # Pipeline completa per un episodio: analisi sorgente, classificazione,
     # segmentazione, dedup, generazione timecode, script VPY, encode e mux.
     stem = source_path.stem
@@ -1066,14 +1113,14 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
         print(f"  --progressive-dedup attivo: salto TIVTC/classificatore/bob, dedup diretto su sorgente progressiva")
         entries = make_progressive_entries_from_source_timecodes(src_tc_path, source_frame_count)
     elif bob:
-        print(f"  --bob attivo: salto TIVTC/classificatore/dedup, forzo tutto a video_bob (60fps)")
+        print(f"  --bob attivo: salto TIVTC/classificatore/dedup, forzo tutto a video_bob ({_format_fps_ratio(bob_fps)}fps)")
         entries = make_bob_entries_from_source_timecodes(src_tc_path, source_frame_count)
     else:
-        stats_path, tfm_path = run_pass1(source_path, work_dir)
-        _tc_v1_path, framemap_path = run_pass2a(source_path, stats_path, tfm_path, work_dir)
+        stats_path, tfm_path = run_pass1(source_path, work_dir, field_order=field_order)
+        _tc_v1_path, framemap_path = run_pass2a(source_path, stats_path, tfm_path, work_dir, field_order=field_order)
         entries = parse_framemap(framemap_path)
         # Classificazione multi-metrica dei frame sorgente e applicazione al framemap.
-        classifications = run_multimetric_classification(source_path, work_dir, tfm_path)
+        classifications = run_multimetric_classification(source_path, work_dir, tfm_path, field_order=field_order)
         forced_ranges = []
         if bob_chapters:
             forced_ranges.extend(_bob_ranges_from_chapters(source_path, work_dir, bob_chapters))
@@ -1120,7 +1167,8 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
         print(f"  Progressivo: {film_dec} -> {film_out} frame (dedup -{film_dec - film_out})")
     else:
         print(f"  Film:      {film_dec} -> {film_out} frame @ 23.976fps (dedup -{film_dec - film_out})")
-        print(f"  Video bob: {bob_dec} -> {bob_out} frame @ 59.94fps")
+        bob_fps_text = _format_fps_ratio(bob_fps) if bob else "59.94"
+        print(f"  Video bob: {bob_dec} -> {bob_out} frame @ {bob_fps_text}fps")
     print(f"  Output:    {total_out} frame totali")
 
     tc_final = work_dir / f"{stem}_tc_final.txt"
@@ -1153,11 +1201,13 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
         print(f"  Frame range: {fr_start}-{fr_end} ({total_out} frame)")
 
     vpy_path = work_dir / f"{stem}_pass2b.vpy"
-    assume_fps_num = 60000 if bob else 30000
+    assume_fps_num = bob_fps[0] if bob else 30000
+    assume_fps_den = bob_fps[1] if bob else 1001
     generate_pass2b_script(source_path, tfm_path, stats_path, segments, vpy_path, resize_w, resize_h,
                            additional_vpy, frame_range, progressive_source=progressive_dedup,
-                           assume_fps_num=assume_fps_num, assume_fps_den=1001,
-                           resize_enabled=resize_enabled, output_yuv444=output_yuv444)
+                           assume_fps_num=assume_fps_num, assume_fps_den=assume_fps_den,
+                           resize_enabled=resize_enabled, output_yuv444=output_yuv444,
+                           field_order=field_order)
 
     if analyze_only:
         if progressive_dedup:
@@ -1197,7 +1247,7 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
     encode(vpy_path, encoded_path, color_flags, par_flags, chroma_flags)
 
     mux_timecodes = None if bob else tc_final
-    default_duration = "60000/1001fps" if bob else None
+    default_duration = f"{_format_fps_ratio(bob_fps)}fps" if bob else None
     mux_final(
         encoded_path,
         source_path,
@@ -1313,9 +1363,10 @@ def main():
     parser.add_argument("--work-dir", default=None, help="Cartella di lavoro (default: <output>/work)")
     parser.add_argument("--additional-vpy", default=None, help="Script VPY aggiuntivo da appendere al pass2b (opera su 'clip')")
     parser.add_argument("--frames", default=None, help="Range di frame output da elaborare (es. 1500 o 100-5000)")
-    parser.add_argument("--bob", action="store_true", help="Forza bob deinterlace di tutto il titolo e salta classifier/dedup.")
+    parser.add_argument("--bob", nargs="?", const="60000/1001", default=None, metavar="NUM/DEN", help="Forza bob deinterlace di tutto il titolo e salta classifier/dedup. Rapporto FPS opzionale per il mux CFR, default 60000/1001; es. --bob 50/1.")
     parser.add_argument("--bob-chapters", default=None, help="Forza a bob capitoli 1-based separati da virgola, es. 4 o 4,5,6.")
     parser.add_argument("--bob-range", default=None, help="Forza a bob range temporali START-END separati da virgola, es. 22:30-23:50,10:00-10:20.")
+    parser.add_argument("--field-order", choices=("tff", "bff"), default="tff", help="Ordine field per TFM/QTGMC: tff di default, bff per sorgenti bottom-field-first.")
     parser.add_argument("--progressive-dedup", nargs="?", const="2", default=None, metavar="N", help="Deduplica una sorgente progressiva; N opzionale indica il massimo run da unificare (default se omesso: 2).")
     parser.add_argument("--dedup", nargs="?", const="2", default=None, metavar="N", help="Abilita il dedup sui segmenti film; N opzionale indica il massimo run da unificare (default se omesso: 2).")
     parser.add_argument("--yuv444", action="store_true", help="Produce output video YUV 4:4:4 10-bit invece del default YUV 4:2:0 10-bit.")
@@ -1328,11 +1379,12 @@ def main():
         sys.exit(1)
     progressive_dedup_enabled = args.progressive_dedup is not None
     dedup_enabled = args.dedup is not None
+    bob_enabled = args.bob is not None
 
-    if args.bob and progressive_dedup_enabled:
+    if bob_enabled and progressive_dedup_enabled:
         print("Errore: --bob e --progressive-dedup sono mutuamente esclusivi")
         sys.exit(1)
-    if args.bob and (args.bob_chapters or args.bob_range):
+    if bob_enabled and (args.bob_chapters or args.bob_range):
         print("Errore: --bob non puo' essere combinato con --bob-chapters o --bob-range")
         sys.exit(1)
     if progressive_dedup_enabled and (args.bob_chapters or args.bob_range):
@@ -1349,9 +1401,10 @@ def main():
         if args.work_dir is not None: forbidden.append("--work-dir")
         if args.additional_vpy is not None: forbidden.append("--additional-vpy")
         if args.frames is not None: forbidden.append("--frames")
-        if args.bob: forbidden.append("--bob")
+        if bob_enabled: forbidden.append("--bob")
         if args.bob_chapters is not None: forbidden.append("--bob-chapters")
         if args.bob_range is not None: forbidden.append("--bob-range")
+        if args.field_order != "tff": forbidden.append("--field-order")
         if progressive_dedup_enabled: forbidden.append("--progressive-dedup")
         if dedup_enabled: forbidden.append("--dedup")
         if args.yuv444: forbidden.append("--yuv444")
@@ -1379,6 +1432,7 @@ def main():
     try:
         bob_chapters = _parse_chapter_list(args.bob_chapters)
         bob_ranges = _parse_bob_range_spec(args.bob_range)
+        bob_fps = _parse_fps_ratio(args.bob, "--bob") if bob_enabled else (60000, 1001)
         progressive_dedup_cap = _parse_dedup_cap(args.progressive_dedup, "--progressive-dedup")
         hybrid_dedup_cap = _parse_dedup_cap(args.dedup, "--dedup")
         resize_target = _parse_resize_spec(args.resize)
@@ -1400,14 +1454,16 @@ def main():
             work_dir = _make_run_work_dir(work_root, src)
             print(f"  {src.name} -> {output_path.name}")
             ep_stats = process_episode(src, output_path, work_dir, args.strip_audio, args.strip_sub, args.additional_vpy,
-                                       frame_range, bob=args.bob, analyze_only=args.analyze_only,
+                                       frame_range, bob=bob_enabled, analyze_only=args.analyze_only,
                                        progressive_dedup=progressive_dedup_enabled,
                                        dedup_enabled=dedup_enabled,
                                        dedup_cap=dedup_cap,
                                        bob_chapters=bob_chapters,
                                        bob_ranges=bob_ranges,
                                        resize_target=resize_target,
-                                       output_yuv444=args.yuv444)
+                                       output_yuv444=args.yuv444,
+                                       field_order=args.field_order,
+                                       bob_fps=bob_fps)
             all_stats.append(ep_stats)
             if not args.keep_work:
                 _cleanup_work_dir(work_dir)
@@ -1423,14 +1479,16 @@ def main():
     print(f"Modalita: file singolo")
     print(f"Output:   {output_path}")
     ep_stats = process_episode(source, output_path, work_dir, args.strip_audio, args.strip_sub, args.additional_vpy,
-                               frame_range, bob=args.bob, analyze_only=args.analyze_only,
+                               frame_range, bob=bob_enabled, analyze_only=args.analyze_only,
                                progressive_dedup=progressive_dedup_enabled,
                                dedup_enabled=dedup_enabled,
                                dedup_cap=dedup_cap,
                                bob_chapters=bob_chapters,
                                bob_ranges=bob_ranges,
                                resize_target=resize_target,
-                               output_yuv444=args.yuv444)
+                               output_yuv444=args.yuv444,
+                               field_order=args.field_order,
+                               bob_fps=bob_fps)
     all_stats = [ep_stats]
     if progressive_dedup_enabled:
         _print_progressive_summary(all_stats)
