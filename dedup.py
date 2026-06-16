@@ -16,8 +16,16 @@ def _fmtc_to_yuv420p8(core, vs, clip):
     return core.fmtc.bitdepth(clip, bits=8)
 
 
+def _field_order_settings(field_order):
+    tff = field_order == "tff"
+    return {
+        "fieldbased": 2 if tff else 1,
+        "tfm_order": 1 if tff else 0,
+    }
+
+
 def run_dedup_detection(source_path, work_dir, tfm_path, stats_path, segments,
-                        threshold=None, cap=None):
+                        threshold=None, cap=None, field_order="tff"):
     """Rileva run di duplicati nei segmenti film e aggiunge kept_frames."""
     import vapoursynth as vs
     core = vs.core
@@ -36,7 +44,7 @@ def run_dedup_detection(source_path, work_dir, tfm_path, stats_path, segments,
     print(f"  Rilevamento dedup (cap-{cap}, soglia={threshold}) — core.num_threads={n_threads}...")
 
     dummy_tc = work_dir / "_dedup_dummy_tc.txt"
-    decimated = _build_decimated_clip(core, vs, source_path, tfm_path, stats_path, dummy_tc)
+    decimated = _build_decimated_clip(core, vs, source_path, tfm_path, stats_path, dummy_tc, field_order)
 
     stats = _run_dedup_on_clip(decimated, segments, n_threads, threshold, cap)
 
@@ -132,19 +140,14 @@ def _run_dedup_on_clip(clip, segments, n_threads, threshold, cap):
     }
 
 
-def _build_decimated_clip(core, vs, source_path, tfm_path, stats_path, mkvout_path):
+def _build_decimated_clip(core, vs, source_path, tfm_path, stats_path, mkvout_path, field_order):
     """Costruisce lo stesso stream film decimato che verra' usato dal pass2b."""
-    clip = core.bs.VideoSource(str(source_path), threads=0)
-    clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=2)
+    field = _field_order_settings(field_order)
+    clip = core.bs.VideoSource(str(source_path))
+    clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=field["fieldbased"])
     clip = _fmtc_to_yuv420p8(core, vs, clip)
-    decimated = core.tivtc.TFM(clip, order=1, cthresh=8, input=str(tfm_path))
-    decimated_vinv = core.vinverse.vinverse(decimated, sstr=2.7, amnt=255, scl=0.25)
-    decimated = core.std.ModifyFrame(
-        decimated,
-        [decimated, decimated_vinv],
-        lambda n, f: f[1].copy() if f[0].props.get("_Combed", 0) else f[0].copy(),
-    )
-    return core.tivtc.TDecimate(
+    decimated = core.tivtc.TFM(clip, order=field["tfm_order"], cthresh=8, input=str(tfm_path))
+    decimated = core.tivtc.TDecimate(
         decimated,
         mode=5,
         hybrid=2,
@@ -152,4 +155,10 @@ def _build_decimated_clip(core, vs, source_path, tfm_path, stats_path, mkvout_pa
         input=str(stats_path),
         tfmIn=str(tfm_path),
         mkvOut=str(mkvout_path),
+    )
+    decimated_vinv = core.vinverse.vinverse(decimated, sstr=2.7, amnt=255, scl=0.25)
+    return core.std.ModifyFrame(
+        decimated,
+        [decimated, decimated_vinv],
+        lambda n, f: f[1].copy() if f[0].props.get("_Combed", 0) else f[0].copy(),
     )

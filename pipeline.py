@@ -871,9 +871,9 @@ progressive = core.std.SetFrameProp(clip, prop="_FieldBased", intval=0)
         dummy_esc = str(dummy_path).replace("\\", "\\\\")
         script += f'''
 decimated = core.tivtc.TFM(clip, order={field["tfm_order"]}, cthresh=8, input=r"{tfm_esc}")
+decimated = core.tivtc.TDecimate(decimated, mode=5, hybrid=2, vfrDec=1, input=r"{stats_esc}", tfmIn=r"{tfm_esc}", mkvOut=r"{dummy_esc}")
 decimated_vinv = core.vinverse.vinverse(decimated, sstr=2.7, amnt=255, scl=0.25)
 decimated = core.std.ModifyFrame(decimated, [decimated, decimated_vinv], lambda n, f: f[1].copy() if f[0].props.get('_Combed', 0) else f[0].copy())
-decimated = core.tivtc.TDecimate(decimated, mode=5, hybrid=2, vfrDec=1, input=r"{stats_esc}", tfmIn=r"{tfm_esc}", mkvOut=r"{dummy_esc}")
 {final_420_line.format(name="decimated")}\
 '''
     if need_bob:
@@ -1149,7 +1149,8 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
     if progressive_dedup and dedup_active:
         dedup_stats = run_progressive_dedup_detection(source_path, segments, cap=effective_dedup_cap)
     elif dedup_active:
-        dedup_stats = run_dedup_detection(source_path, work_dir, tfm_path, stats_path, segments, cap=effective_dedup_cap)
+        dedup_stats = run_dedup_detection(source_path, work_dir, tfm_path, stats_path, segments,
+                                          cap=effective_dedup_cap, field_order=field_order)
 
     film_dec = sum(s["num_dec_frames"] for s in segments if s["type"] == "film")
     bob_dec = sum(s["num_dec_frames"] for s in segments if s["type"] == "video_bob")
