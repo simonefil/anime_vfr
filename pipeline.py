@@ -870,9 +870,10 @@ progressive = core.std.SetFrameProp(clip, prop="_FieldBased", intval=0)
         stats_esc = str(stats_path).replace("\\", "\\\\")
         dummy_esc = str(dummy_path).replace("\\", "\\\\")
         script += f'''
+from vsdeinterlace import vinverse
 decimated = core.tivtc.TFM(clip, order={field["tfm_order"]}, cthresh=8, input=r"{tfm_esc}")
 decimated = core.tivtc.TDecimate(decimated, mode=5, hybrid=2, vfrDec=1, input=r"{stats_esc}", tfmIn=r"{tfm_esc}", mkvOut=r"{dummy_esc}")
-decimated_vinv = core.vinverse.vinverse(decimated, sstr=2.7, amnt=255, scl=0.25)
+decimated_vinv = vinverse(decimated, contra_str=2.7, amnt=255, scl=0.25)
 decimated = core.std.ModifyFrame(decimated, [decimated, decimated_vinv], lambda n, f: f[1].copy() if f[0].props.get('_Combed', 0) else f[0].copy())
 {final_420_line.format(name="decimated")}\
 '''

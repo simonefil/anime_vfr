@@ -142,6 +142,8 @@ def _run_dedup_on_clip(clip, segments, n_threads, threshold, cap):
 
 def _build_decimated_clip(core, vs, source_path, tfm_path, stats_path, mkvout_path, field_order):
     """Costruisce lo stesso stream film decimato che verra' usato dal pass2b."""
+    from vsdeinterlace import vinverse
+
     field = _field_order_settings(field_order)
     clip = core.bs.VideoSource(str(source_path))
     clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=field["fieldbased"])
@@ -156,7 +158,7 @@ def _build_decimated_clip(core, vs, source_path, tfm_path, stats_path, mkvout_pa
         tfmIn=str(tfm_path),
         mkvOut=str(mkvout_path),
     )
-    decimated_vinv = core.vinverse.vinverse(decimated, sstr=2.7, amnt=255, scl=0.25)
+    decimated_vinv = vinverse(decimated, contra_str=2.7, amnt=255, scl=0.25)
     return core.std.ModifyFrame(
         decimated,
         [decimated, decimated_vinv],
