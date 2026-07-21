@@ -10,14 +10,14 @@ def build_matched_decimated_branches(core, clip, tfm_path, tfm_order, stats_path
 
     matched_raw = core.tivtc.TFM(clip, order=tfm_order, cthresh=8, input=str(tfm_path))
     matched_vinverse = vinverse(matched_raw, contra_str=2.7, amnt=255, scl=0.25)
-    matched = core.std.ModifyFrame(matched_raw, [matched_raw, matched_vinverse], lambda frame_number, frames: frames[1].copy() if frames[0].props.get("_Combed", 0) else frames[0].copy())
+    matched = core.std.ModifyFrame(matched_raw, [matched_raw, matched_vinverse], lambda n, f: f[1].copy() if f[0].props.get("_Combed", 0) else f[0].copy())
     branches = {"matched": matched}
     if need_decimated:
         if stats_path is None or mkvout_path is None:
             raise ValueError("The decimated branch requires stats_path and mkvout_path")
         decimated_raw = core.tivtc.TDecimate(matched_raw, mode=5, hybrid=2, vfrDec=1, input=str(stats_path), tfmIn=str(tfm_path), mkvOut=str(mkvout_path))
         decimated_vinverse = vinverse(decimated_raw, contra_str=2.7, amnt=255, scl=0.25)
-        branches["decimated"] = core.std.ModifyFrame(decimated_raw, [decimated_raw, decimated_vinverse], lambda frame_number, frames: frames[1].copy() if frames[0].props.get("_Combed", 0) else frames[0].copy())
+        branches["decimated"] = core.std.ModifyFrame(decimated_raw, [decimated_raw, decimated_vinverse], lambda n, f: f[1].copy() if f[0].props.get("_Combed", 0) else f[0].copy())
     return branches
 
 
