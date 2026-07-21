@@ -1,314 +1,179 @@
 # anime_vfr
 
-`anime_vfr` nasce per un problema tipico di molti DVD anime NTSC: dentro lo stesso episodio possono convivere sezioni film telecinate recuperabili a 23.976 fps, sezioni realmente interlacciate a 59.94 campi/s, crediti o titoli digitali sovrapposti, CG, pan generati in video, cambi di cadenza e hard telecine non uniforme. In questi casi il file e' spesso tutto 480i/29.97 a livello di contenitore o MPEG-2, ma il contenuto reale non e' tutto della stessa natura.
+[English documentation](README_ENG.md)
 
-Il caso semplice e' un DVD soft-telecined o hard-telecined regolare: si applica IVTC e si torna a 23.976 fps. Il caso opposto e' una sorgente interlacciata pura: si applica bob deinterlace e si conserva il movimento a 59.94 fps. `anime_vfr` serve per la zona intermedia, cioe' per sorgenti ibride in cui entrambe le decisioni sono corrette solo localmente. E' una casistica frequente nei DVD anime NTSC di serie TV lunghe e prodotte in transizione analogico/digitale: nel lavoro su questo script e' stata verificata su `Bleach`, mentre discussioni tecniche pubbliche riportano problemi analoghi o vicini su DVD di `Naruto`, `Naruto Shippuden` e `One Piece`. Guide storiche citano inoltre DVD ibridi come `X TV`, `Azumanga Daioh` e `Super GALS`, con opening/ending, sezioni digitali o parti pure interlacciate mescolate a materiale telecinato.
+`anime_vfr` converte sorgenti MKV ibride, tipicamente DVD anime NTSC, in video progressivo mantenendo il trattamento corretto per ogni parte del contenuto. Una stessa sorgente può contenere film telecinato, materiale progressivo e movimento realmente interlacciato: applicare un unico IVTC o un bob globale non è sempre corretto.
 
-Le soluzioni globali hanno compromessi pesanti. Un IVTC applicato a tutto l'episodio preserva bene il materiale film, ma sulle sezioni realmente interlacciate produce judder, drop errati o combing residuo. Un bob globale risolve il movimento 60i, ma trasforma anche il film in 60p interpolato, aumentando i frame e peggiorando la pulizia dei dettagli senza recuperare la struttura originale. Una conversione CFR unica a 23.976 o 29.97 costringe sempre una parte del materiale a un timing sbagliato: o si perde fluidita' nelle parti video, o si duplicano/interpolano frame nel film.
+La pipeline produce un output VFR usando tre strategie operative:
 
-La strategia di `anime_vfr` e' diversa: classificare il contenuto per frame/segmento, costruire un output progressivo VFR e usare il trattamento corretto per ogni zona. Le parti film passano da IVTC/decimazione; le parti interlacciate reali passano da bob deinterlace; il mux finale usa timecode Matroska per mantenere il timing originale senza forzare tutto a un solo framerate costante.
+- `match_keep_pts`: ricostruisce i frame con TFM e conserva tutti i timestamp sorgente;
+- `match_decimate`: usa TFM e rimuove soltanto la ridondanza confermata dal mapping TDecimate;
+- `bob_expand`: ricostruisce i singoli field per il materiale realmente interlacciato.
 
-## Installazione
+Le etichette 24/30/60 fps nel report descrivono la cadenza osservata; non decidono da sole quale strategia applicare.
 
-Prima di eseguire lo script, apri `config.py` e adatta i path dei binari alla tua macchina:
+## Requisiti e configurazione
 
-- `MKVMERGE`, `MKVEXTRACT`, `VSPIPE`, `PYTHON_BIN`, `MEDIAINFO`, `FFMPEG`
-- `ENCODER_BIN`
-- `ENCODER_PARAMS`
+Il progetto è configurato per macOS/Homebrew. Prima dell'uso controlla [config.py](config.py), in particolare:
 
-I parametri di compressione inclusi sono solo un preset operativo di esempio. Devi verificarli e modificarli in base all'encoder scelto, alla GPU/CPU disponibile e al livello qualitativo desiderato. In particolare, se non usi `NVEncC`, devi cambiare sia `ENCODER_BIN` sia `ENCODER_PARAMS` con una riga compatibile con il tuo encoder.
+- i path di `mkvmerge`, `mkvextract`, `vspipe`, Python, MediaInfo, FFmpeg e FFprobe;
+- `ENCODER_BIN` e `ENCODER_PARAMS`.
 
-Assicurati che `python` sia il Python dell'ambiente VapourSynth, cioe' quello in grado di importare `vapoursynth`. Servono: Python packages `numpy`, `vsdeinterlace`, `vsaa`, `vstools`, `vskernels` e relative dipendenze; plugin VapourSynth BestSource, TIVTC, fmtconv/fmtc, Sneedif/NNEDI3 OpenCL e i plugin richiesti da `QTempGaussMC` come MVTools/RGTools/RemoveGrain o equivalenti della propria distribuzione; binari esterni `VSPipe`, `mkvmerge`, `mkvextract`, `MediaInfo`, `ffmpeg`; encoder video compatibile con input Y4M da pipe, ad esempio `ffmpeg`, Rigaya `NVEncC` per NVIDIA NVENC, Rigaya `QSVEncC` per Intel Quick Sync, Rigaya `VCEEncC` per AMD VCE/VCN/AMF, oppure Rigaya `rkmppenc` per Rockchip MPP. I path e i parametri dell'encoder si configurano in `config.py`. Il combing residuo viene trattato dalla funzione `vinverse` inclusa in `vsdeinterlace`; non serve un plugin nativo Vinverse separato.
+La configurazione inclusa usa `ffmpeg-full`, `libx265`, preset `fast` e CRF 20. L'encoder deve accettare Y4M da standard input e produrre un file video compatibile con Matroska.
 
-Verifiche minime:
+Servono inoltre:
 
-```powershell
-python -m pip install numpy
-python -c "import vapoursynth as vs; import numpy; print(vs.__version__)"
-python -c "import vapoursynth as vs; from vsdeinterlace import vinverse; c=vs.core; print(hasattr(c,'bs'), hasattr(c,'tivtc'), callable(vinverse), hasattr(c,'fmtc'), hasattr(c,'sneedif'))"
-python -c "from vsdeinterlace.qtgmc import QTempGaussMC; from vsaa import NNEDI3; print(NNEDI3(opencl=True)._deinterlacer_function)"
+- Python con `numpy` e accesso allo stesso ambiente VapourSynth usato da VSPipe;
+- moduli Python `vsdeinterlace`, `vsaa`, `vstools` e `vskernels` con le relative dipendenze;
+- plugin VapourSynth BestSource, TIVTC, fmtconv, Sneedif/NNEDI3 e quelli richiesti da `QTempGaussMC`;
+- MKVToolNix, MediaInfo e FFmpeg.
+
+La traccia video sorgente deve avere track ID Matroska `0`: è la traccia dalla quale la pipeline estrae i timestamp.
+
+Verifica minima dell'ambiente:
+
+```bash
+/opt/homebrew/bin/python3.14 -c "import vapoursynth as vs; import numpy; print(vs.__version__)"
+/opt/homebrew/bin/vspipe --version
+/opt/homebrew/bin/mkvmerge --version
 ```
 
-Nel codice il branch bob usa:
+## Uso rapido
 
-```python
-QTempGaussMC(
-    clip,
-    basic_bobber=NNEDI3(nsize=4, nns=4, qual=2, opencl=True),
-    tff=True,
-    basic_tr=3,
-    final_tr=2,
-    source_match_mode=QTempGaussMC.SourceMatchMode.TWICE_REFINED,
-).deinterlace()
+Prima di codificare una sorgente nuova è consigliata un'analisi completa:
+
+```bash
+python3.14 anime_vfr.py "/path/episodio.mkv" --analyze-only --keep-work
+python3.14 anime_vfr.py "/path/episodio.mkv" --output "/path/encoded"
 ```
 
-Con `vsaa.NNEDI3(opencl=True)` il wrapper seleziona il backend OpenCL `core.lazy.sneedif.NNEDI3`; con `opencl=False` userebbe invece il backend CPU `core.lazy.znedi3.nnedi3`.
+È possibile passare anche una cartella; vengono elaborati gli MKV presenti direttamente al suo interno.
 
-## Uso Rapido
-
-```powershell
-cd C:\percorso\anime_vfr
-python anime_vfr.py "C:\video\episodio.mkv" --analyze-only
-python anime_vfr.py "C:\video\episodio.mkv" --output "D:\encoded"
-python anime_vfr.py "C:\video\episodio.mkv" --resize 768x576 --yuv444
+```bash
+python3.14 anime_vfr.py "/path/serie" --output "/path/encoded"
 ```
 
-## Parametri
-
-Sintassi:
+## Opzioni
 
 ```text
 anime_vfr.py source [opzioni]
 ```
 
-| Parametro               | Descrizione breve                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------------------ |
-| `source`                | File MKV sorgente, oppure cartella di MKV.                                                  |
-| `--report`              | Analizza MKV gia' prodotti leggendo i timestamps_v2; non esegue la pipeline.               |
-| `--analyze-only`        | Esegue analisi, classificazione, eventuale dedup, timecode e VPY, ma salta encode/mux.     |
-| `--bob [NUM/DEN]`       | Forza tutto il titolo a bob CFR e salta TIVTC/classificatore/dedup; default `60000/1001`.   |
-| `--bob-chapters LIST`   | Forza a 60p bob uno o piu' capitoli, es. `4` o `4,5,6`.                                    |
-| `--bob-range LIST`      | Forza a 60p bob uno o piu' range temporali, es. `22:30-23:50`.                             |
-| `--field-order tff|bff` | Imposta l'ordine field usato da TFM/QTGMC; default `tff`.                                  |
-| `--progressive-dedup [N]` | Deduplica una sorgente gia' progressiva; `N` opzionale limita il run massimo.             |
-| `--dedup [N]`           | Abilita il dedup sui segmenti film; `N` opzionale limita il run massimo.                   |
-| `--resize WIDTHxHEIGHT` | Ridimensiona l'output alla risoluzione esatta indicata, es. `768x576`.                     |
-| `--yuv444`              | Produce output video `YUV444P10` invece del default `YUV420P10`.                           |
-| `--output PATH`         | Cartella di output; se specificata mantiene il nome del file sorgente.                     |
-| `--work-dir PATH`       | Cartella di lavoro; se omessa usa `<output>\work`.                                         |
-| `--keep-work`           | Conserva i file intermedi invece di pulire la work dir a fine elaborazione.                |
-| `--additional-vpy PATH` | Appende uno snippet VPY al pass finale; non e' un VPY standalone.                          |
-| `--frames RANGE`        | Elabora solo un range di frame output, formato `N` oppure `A-B`.                           |
-| `--strip-audio`         | Non muxa le tracce audio sorgenti.                                                         |
-| `--strip-sub`           | Non muxa i sottotitoli sorgenti.                                                           |
+| Opzione | Comportamento |
+| --- | --- |
+| `source` | File MKV o cartella contenente MKV. |
+| `--analyze-only` | Esegue analisi, classificazione, dedup richiesto, timecode e VPY, senza encode o mux. |
+| `--report` | Misura un MKV già prodotto; deve essere usato senza altre opzioni. |
+| `--output PATH` | Cartella degli MKV finali. |
+| `--work-dir PATH` | Radice per le cartelle di lavoro delle singole run. |
+| `--keep-work` | Conserva gli artefatti intermedi. |
+| `--bob [NUM/DEN]` | Forza bob CFR su tutto il titolo; default `60000/1001`. |
+| `--bob-chapters LIST` | Forza bob sui capitoli 1-based indicati, per esempio `4,5`. |
+| `--bob-range LIST` | Forza bob sui range temporali indicati, per esempio `22:30-23:50`. |
+| `--field-order tff\|bff` | Ordine dei field per TFM/QTGMC; default `tff`. |
+| `--progressive-dedup [N]` | Deduplica una sorgente già progressiva senza TIVTC o classificazione. |
+| `--dedup [N]` | Abilita il dedup opzionale sui segmenti matched/decimated. |
+| `--resize WIDTHxHEIGHT` | Imposta la risoluzione esatta di output. |
+| `--yuv444` | Produce YUV 4:4:4 10 bit anziché YUV 4:2:0 10 bit. |
+| `--threads N` | Imposta i thread VapourSynth e prefetch; default `os.cpu_count()`. |
+| `--analysis-workers N` | Imposta i worker delle metriche NumPy; default uguale a `--threads`. |
+| `--additional-vpy PATH` | Appende uno snippet VPY al clip finale. |
+| `--frames N` | Codifica i primi `N` frame output. |
+| `--frames A-B` | Codifica il range output half-open `[A,B)`. |
+| `--strip-audio` | Esclude le tracce audio dal mux. |
+| `--strip-sub` | Esclude le tracce sottotitoli dal mux. |
 
-### `source`
+### Analisi e report
 
-In modalita' normale e' un singolo MKV o una cartella di MKV da processare. Con `--report` puo' essere un MKV gia' prodotto oppure una cartella contenente MKV gia' prodotti.
+`--analyze-only` esegue la stessa decisione usata dall'encode. Il report contiene:
 
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv"
-python anime_vfr.py "D:\encoded" --report
+- una tabella delle strategie ponderata sul numero di frame sorgente;
+- una tabella delle stesse strategie ponderata sulla durata PTS;
+- tutti gli intervalli decisionali con frame sorgente/output, tempi, strategia, cadenza osservata e motivazioni disponibili;
+- statistiche dei drop strutturali e del dedup opzionale.
+
+Con `--keep-work` restano disponibili anche i file diagnostici per frame e per run, il VPY finale e i timecode. Senza `--keep-work` la cartella della run viene eliminata dopo la stampa del report.
+
+```bash
+python3.14 anime_vfr.py "/path/episodio.mkv" --analyze-only --keep-work
 ```
 
-### `--report`
+`--report` non esegue il classificatore. Estrae i timestamp dal track ID Matroska `0` di un MKV esistente e riassume finestre temporali come 24, 30, 60 fps, `other`, `VFR` o `unknown`. Stampa sia la distribuzione per numero di frame output sia quella per durata. È una misura del risultato muxato, non una spiegazione delle decisioni prese dalla pipeline.
 
-Non usa il classificatore e non ricostruisce la pipeline. Estrae i timestamps_v2 dal MKV finale, misura gli intervalli tra frame e stampa una distribuzione posteriore in classi `<24`, `24`, `24<x<60`, `60`, `>60`. Serve a controllare il risultato finale, non a decidere come encodare.
-
-```powershell
-python anime_vfr.py "D:\encoded\episodio.mkv" --report
-python anime_vfr.py "D:\encoded" --report
+```bash
+python3.14 anime_vfr.py "/path/encoded/episodio.mkv" --report
+python3.14 anime_vfr.py "/path/encoded" --report
 ```
 
-### `--analyze-only`
+### Override bob
 
-Esegue la pipeline fino alla generazione dei timecode finali e dello script VPY, poi si ferma prima di encode e mux. Stampa su console classificazione 24/60, statistiche dedup se il dedup e' abilitato, istogramma FPS pre-dedup su 20 bucket e istogramma drop dedup su 20 bucket.
+`--bob` salta TFM, TDecimate, classificatore e dedup, ricostruisce tutto il titolo con bob e usa un mux CFR. Il rapporto opzionale deve essere `NUM/DEN`; per esempio, `--bob 50/1` per una sorgente 25i da portare a 50p.
 
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --analyze-only
-python anime_vfr.py "C:\video\episodio.mkv" --analyze-only > analisi.txt
+`--bob-chapters` e `--bob-range` intervengono invece solo sulle parti indicate e lasciano il resto alla classificazione automatica. I range accettano secondi, `MM:SS` o `HH:MM:SS` e sono separati da virgole. Gli override locali sono incompatibili con `--bob`, `--progressive-dedup` e `--report`.
+
+```bash
+python3.14 anime_vfr.py "/path/episodio.mkv" --bob-chapters 4
+python3.14 anime_vfr.py "/path/episodio.mkv" --bob-range 22:30-23:50,10:00-10:20
 ```
 
-### `--bob`
+### Dedup
 
-Forza l'intero titolo a bob CFR. E' utile quando sai gia' che la sorgente e' interlacciata reale e non vuoi tentare recupero film. In questa modalita' non vengono eseguiti TFM/TDecimate, classificatore e dedup. Il mux finale viene scritto come CFR usando il rapporto FPS passato a `--bob`, senza timestamps v2, per evitare che i PTS sorgente quantizzati facciano apparire il bob globale come VFR.
+`--dedup [N]` compatta hold o duplicati visivi sui rami matched/decimated dopo la scelta della strategia primaria. Non sostituisce i drop strutturali di `match_decimate`. `N` limita il numero massimo di frame consecutivi compattabili in un singolo output e vale 2 se omesso.
 
-Se non specifichi il valore, resta il default storico `60000/1001`. Il valore opzionale deve essere nel formato `NUM/DEN`; per sorgenti PAL 25i full-bob usa `50/1`.
+`--progressive-dedup [N]` applica soltanto dedup e timing a una sorgente già progressiva. Non deve essere usato su materiale ancora interlacciato o telecinato.
 
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --bob
-python anime_vfr.py "C:\video\episodio_pal.mkv" --bob 50/1
-```
+### Resize, formato e filtri aggiuntivi
 
-### `--bob-chapters` e `--bob-range`
+Senza `--resize` vengono mantenute le dimensioni codificate e il display aspect ratio sorgente. Con `--resize`, la risoluzione richiesta viene trattata come pixel quadrati: la pipeline non calcola automaticamente una risoluzione dal SAR.
 
-Forzano a 60p bob solo parti specifiche del titolo, lasciando il resto alla classificazione automatica. Servono quando una sezione e' nota a priori come movimento interlacciato reale, per esempio ending con credits o scroll verticali che devono rimanere fluidi. `--bob-chapters` usa indici capitolo 1-based letti dal MKV sorgente; `--bob-range` usa range temporali manuali nel formato `START-END`, separati da virgola.
+`--additional-vpy` viene eseguito dopo assemblaggio, resize e conversione nel formato richiesto. Lo snippet riceve `clip`, deve riassegnarlo e non deve cambiare numero o ordine dei frame, perché i timecode sono già stati calcolati. Non deve chiamare `set_output()`.
 
-Questi override vengono applicati dopo il classificatore e prima della segmentazione finale. Non usano la timeline decimata: i frame del range vengono forzati a `video_bob` sulla timeline sorgente, quindi ogni frame sorgente genera due frame output e i timecode dividono in due la durata reale del frame. Sono mutuamente esclusivi con `--bob`, `--progressive-dedup` e `--report`.
-
-`--field-order` controlla l'ordine dei campi usato dalle parti interlacciate. Il default e' `tff`, equivalente al comportamento storico. Usa `--field-order bff` solo per sorgenti bottom-field-first verificate.
-
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --bob-chapters 4
-python anime_vfr.py "C:\video\episodio.mkv" --bob-chapters 4,5,6
-python anime_vfr.py "C:\video\episodio.mkv" --bob-range 22:30-23:50
-python anime_vfr.py "C:\video\episodio.mkv" --bob-range 22:30-23:50,10:00-10:20
-```
-
-### `--progressive-dedup`
-
-Usa solo la parte dedup/timecode su una sorgente gia' progressiva. Salta TIVTC, classificatore e bob: ogni frame sorgente viene trattato come frame progressivo valido, poi i frame visivamente duplicati vengono rimossi e la loro durata viene trasferita ai timecode VFR. Il valore opzionale `N` indica quanti frame consecutivi possono essere compattati al massimo; se scrivi solo `--progressive-dedup`, viene usato `N=2`.
-
-Questa modalita' serve per sorgenti che non hanno bisogno di IVTC o deinterlace, ma contengono hold/duplicati reali che si vogliono compattare in VFR. Non e' adatta a sorgenti interlacciate o telecinate non gia' risolte.
-
-```powershell
-python anime_vfr.py "C:\video\progressivo.mkv" --progressive-dedup --analyze-only
-python anime_vfr.py "C:\video\progressivo.mkv" --progressive-dedup 4 --analyze-only
-python anime_vfr.py "C:\video\progressivo.mkv" --progressive-dedup --output "D:\encoded"
-```
-
-### `--dedup`
-
-Abilita il dedup sui segmenti film della pipeline ibrida. Senza questo flag, la pipeline fa IVTC, classificazione 24/60, bob delle sezioni interlacciate reali e generazione dei timecode VFR, ma conserva tutti i frame film decimati. `--dedup` serve quando vuoi compattare hold e duplicati visivi trasferendone la durata ai timecode VFR. Il valore opzionale `N` indica quanti frame consecutivi possono essere compattati al massimo; se scrivi solo `--dedup`, viene usato `N=2`.
-
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --dedup
-python anime_vfr.py "C:\video\episodio.mkv" --dedup 4
-```
-
-### `--resize`
-
-Ridimensiona l'output alla risoluzione esatta indicata nel formato `WIDTHxHEIGHT`.
-
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --resize 768x576
-python anime_vfr.py "C:\video\episodio.mkv" --resize 720x540
-```
-
-Il valore non viene calcolato automaticamente dal SAR: se vuoi un output 4:3 a pixel quadrati partendo da un DVD NTSC `720x480 SAR 8:9`, devi passare tu una risoluzione 4:3, per esempio `640x480`, `720x540` o `768x576`. Quando `--resize` e' attivo, il mux finale non scrive flag PAR per la traccia video, perche' la risoluzione richiesta viene trattata come pixel quadrati.
-
-Il resize finale usa `fmtc.resample` con pass interno a 16 bit e ritorno a 10 bit. Questo evita il vecchio path basato su `core.resize` e mantiene coerenti resize, bitdepth e ricampionamento chroma.
-
-### `--yuv444`
-
-Produce output video `YUV444P10` invece del default `YUV420P10`.
-
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --yuv444
-python anime_vfr.py "C:\video\episodio.mkv" --resize 768x576 --yuv444
-```
-
-La conversione a `YUV444P10` viene fatta con `fmtc` dopo il trattamento dei rami film/bob e dopo l'assemblaggio finale dei segmenti. Quindi avviene dopo TFM/TDecimate, Vinverse, QTGMC/bob ed eventuale resize di output. Se usi anche `--additional-vpy`, lo snippet riceve gia' `clip` in `YUV444P10`.
-
-### `--output` e `--work-dir`
-
-`--output` sceglie dove scrivere gli MKV finali. Se viene specificato, il file finale mantiene esattamente il nome del sorgente. Se viene omesso, l'output viene scritto nella stessa cartella del sorgente con suffisso `_1`, cosi' il file originale non viene sovrascritto.
-
-`--work-dir` sceglie dove creare gli artefatti necessari alla lavorazione. Ogni processamento usa una sottocartella univoca, quindi piu' istanze possono condividere la stessa work dir senza sovrascrivere i file intermedi. Senza `--keep-work`, la sottocartella della run viene pulita al termine; gli output richiesti dall'utente non dipendono da `--keep-work`.
-
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --output "D:\encoded"
-python anime_vfr.py "C:\video\episodio.mkv" --work-dir "E:\temp\anime_vfr"
-```
-
-Esempi di output:
-
-```text
-python anime_vfr.py "C:\video\episodio.mkv"
-  -> C:\video\episodio_1.mkv
-
-python anime_vfr.py "C:\video\episodio.mkv" --output "D:\encoded"
-  -> D:\encoded\episodio.mkv
-```
-
-### `--additional-vpy`
-
-Appende uno snippet VPY al pass finale generato da `anime_vfr`. Non e' un VPY autonomo: viene copiato dentro il pass2b dopo che la pipeline ha gia' creato il clip VFR finale.
-
-Quando lo snippet viene eseguito, esistono gia':
-
-- `import vapoursynth as vs`
-- `core = vs.core`
-- `clip`, cioe' il clip gia' assemblato dai segmenti 24p/60p, gia' ridimensionato se hai usato `--resize`, e convertito in `YUV420P10` oppure in `YUV444P10` se hai usato `--yuv444`
-
-Lo snippet lavora sulla variabile `clip` e la riassegna. Un caso tipico e' azzerare il flag interlacciato residuo e forzare il tag CFR tecnico prima dei filtri:
+Esempio minimo:
 
 ```python
 clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval=0)
-clip = core.std.AssumeFPS(clip, fpsnum=30000, fpsden=1001)
-
-from vstools import depth
-clip = depth(clip, 16)
-
-from vsdeband import placebo_deband
-clip = placebo_deband(clip, radius=8.0, thr=3.0, iterations=4, grain=0.0)
 ```
 
-Non ricaricare la sorgente con `VideoSource` e non chiamare `clip.set_output(0)`: `anime_vfr` lo aggiunge alla fine. Lo snippet deve mantenere numero e ordine dei frame, perche' i timecode VFR sono gia' stati generati.
+### Selezione dei frame
 
-Esempio di uso:
+`--frames` seleziona frame della timeline output, quindi dopo classificazione, decimazione ed eventuale dedup. La pipeline analizza comunque l'intera sorgente prima di applicare il range. Il limite finale è esclusivo.
 
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --additional-vpy "C:\filtri\filtri.vpy"
-```
+Audio e sottotitoli vengono ritagliati in stream copy usando gli stessi limiti temporali del video. In questa modalità capitoli e allegati Matroska non vengono conservati; ciò include gli eventuali font allegati richiesti dai sottotitoli ASS.
 
-Lo stesso modello e' quello usato dagli snippet generati da strumenti come `gto_crop_detect.py`: il file prodotto opera direttamente su `clip` e viene appeso al pass2b.
+## Timing e sicurezza delle transizioni
 
-### `--frames`
+La pipeline separa matchability, ridondanza e cadenza osservata. TDecimate viene usato soltanto nei run matchable per i quali esiste un mapping di ridondanza validato; negli altri run ricostruibili vengono conservati tutti i PTS.
 
-Limita l'encode a un range di frame output. Con un singolo numero `N` processa `0-N`; con `A-B` processa l'intervallo indicato. Quando e' attivo, audio e sottotitoli vengono trimmati con FFmpeg prima del mux.
+Le transizioni tra matched e bob vengono chiuse usando le dipendenze dei field indicate dai match TFM, evitando che un frame ricostruito usi un field appartenente al lato bob della frontiera.
 
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --frames 1500
-python anime_vfr.py "C:\video\episodio.mkv" --frames 100-5000
-```
+I timecode finali derivano dalla timeline sorgente. Il file V2 contiene un timestamp per ogni frame output più un timestamp terminale, necessario per conservare esattamente anche la durata dell'ultimo frame dopo bob, decimazione, dedup o `--frames`. Una durata non quantizzabile può essere mantenuta nei percorsi matched, ma impedisce il bob sicuro di quel frame.
 
-### `--strip-audio`, `--strip-sub`
+## Output e file di lavoro
 
-`--strip-audio` e `--strip-sub` escludono rispettivamente audio e sottotitoli dal mux finale.
+Se `--output` non è specificato, un file `episodio.mkv` produce `episodio_1.mkv` accanto alla sorgente. Con `--output`, viene mantenuto il nome originale nella cartella scelta; la pipeline rifiuta di sovrascrivere direttamente il sorgente.
 
-```powershell
-python anime_vfr.py "C:\video\episodio.mkv" --strip-audio
-python anime_vfr.py "C:\video\episodio.mkv" --strip-sub
-```
+Ogni elaborazione usa una sottocartella univoca dentro `--work-dir` o, per default, dentro `work` nella cartella di output. Questo evita collisioni tra run parallele. In un mux completo vengono riutilizzati dal sorgente audio, sottotitoli, capitoli e allegati, salvo le esclusioni richieste.
 
-## Funzionamento
-
-La pipeline non decide il framerate finale guardando soltanto l'output di TDecimate. TIVTC viene usato per costruire una timeline film coerente e per estrarre segnali utili, ma la decisione 24p/60p viene presa sui frame sorgente con un classificatore multi-metrica. Questo e' necessario sulle sorgenti anime miste: scene quasi statiche, pattern incompleti o frame combed isolati possono ingannare un singolo indicatore. La pipeline incrocia piu' segnali e alla fine riduce tutto a una scelta binaria: film oppure bob.
-
-Per prima cosa vengono letti metadati, SAR e timestamps_v2 della sorgente. I timestamps sorgente sono la base temporale: servono a generare i timecode finali e a chiudere correttamente anche l'ultimo segmento, evitando drift cumulativo rispetto all'audio. Se non specifichi `--resize`, la risoluzione campionata resta quella della sorgente e, quando necessario, il mux finale conserva il display aspect ratio tramite flag PAR. Se specifichi `--resize`, la pipeline produce esattamente la risoluzione richiesta e non scrive flag PAR per la traccia video.
-
-Il pass TIVTC iniziale produce le informazioni di match tra campi e decimazione. TFM cerca corrispondenze tra campi per recuperare i frame progressivi da materiale telecinato; TDecimate costruisce la timeline decimata. Durante il secondo pass viene creato un framemap che collega ogni frame della timeline decimata al frame sorgente da cui deriva. Questo collegamento e' essenziale: la classificazione lavora sulla sorgente, ma l'assemblaggio film lavora sulla timeline decimata.
-
-Il classificatore considera ogni frame sorgente come centro di una finestra di dieci campi. In quella finestra misura quali campi sono quasi uguali al campo precedente tramite differenza luma 16x16: sotto soglia sono considerati corrispondenti. Il telecine 3:2 produce una struttura ciclica riconoscibile; per evitare falsi positivi il codice accetta come fase telecine solo il caso stretto con esattamente due match distanti cinque campi. Se questo pattern e' presente e il frame non e' combed, il frame viene classificato come 24p. Se invece e' combed, il flag TFM prevale e il frame viene trattato come 60i reale.
-
-Il solo pattern non basta. La pipeline misura anche il movimento dei campi e un rapporto FFT sull'energia verticale a Nyquist del piano luma. L'energia a Nyquist intercetta l'alternanza tra righe, tipica dell'interlacciamento con movimento; valori molto bassi, insieme a movimento sufficiente, possono promuovere materiale progressivo/telecine anche quando il pattern ciclico non e' completo. Le scene molto statiche vengono trattate con prudenza: se quasi tutti i campi corrispondono e il movimento e' minimo, la decisione non viene presa come prova forte di 60i, perche' anche materiale progressivo fermo puo' avere campi quasi identici.
-
-Dopo la classificazione iniziale vengono applicate passate di coerenza. Le ancore telecine isolate vengono scartate se non hanno abbastanza vicini coerenti; i piccoli cluster telecine circondati da 60i vengono riclassificati; i frame ambigui ereditano dalla densita' locale e dall'ancora piu' vicina, con un bias coerente con il motivo per cui erano ambigui. Infine, sui cluster 60i abbastanza lunghi viene fatta una verifica IVTC speculativa: si applica TFM lento su una subclip e si controlla quanti frame restano combed. Un cluster viene recuperato come telecine solo se IVTC lo pulisce e se il movimento medio e' sufficiente; questo evita di confondere scene statiche con vero recupero 24p.
-
-Alla fine la pipeline normalizza in due classi operative. Solo i frame classificati `interlaced_60i` diventano `video_bob`; tutto il resto entra nel ramo `film`. Il framemap viene riscritto con questa scelta binaria e raggruppato in segmenti contigui. Nei segmenti bob vengono conservati gli indici sorgente esatti, perche' TDecimate puo' aver saltato frame sorgente dentro una stessa zona visiva e non bisogna reinserire frame sbagliati.
-
-Gli override `--bob-chapters` e `--bob-range` intervengono in questo punto: non cambiano le metriche del classificatore, ma sostituiscono la decisione finale nei range scelti dall'utente. Sono pensati per casi editorialmente noti, come ending sempre da tenere a 60p, e vanno preferiti a euristiche globali quando la scelta dipende dalla struttura dell'episodio.
-
-Il dedup lavora solo sui segmenti film. Ricostruisce lo stesso stream decimato che verra' usato nell'encode, confronta frame film consecutivi e raggruppa run di duplicati fino al limite configurato. Se trova, per esempio, una run 4-in-1, tiene un solo frame video ma allunga il timing tramite timecode. In questo modo il contenuto visivo non viene ripetuto inutilmente, ma la durata resta agganciata alla sorgente.
-
-I timecode finali sono generati dalla timeline sorgente e dalla segmentazione. Nei segmenti film viene scritto un timestamp per ogni frame decimato tenuto; con dedup il timestamp successivo avanza della durata rappresentata dalla run. Nei segmenti bob della pipeline ibrida ogni frame sorgente genera due frame output, quindi la durata sorgente viene divisa in due. L'ultimo timestamp viene chiuso usando la durata stimata dai timestamps sorgente, non un framerate teorico fisso. La modalita' `--bob` globale fa eccezione: genera un output CFR al rapporto passato a `--bob` e non muxa timestamps v2.
-
-Il VPY finale costruisce solo i rami necessari. Se ci sono segmenti film, crea il ramo TFM/TDecimate e applica Vinverse sui residui combed. Se ci sono segmenti bob/60p, crea il ramo QTempGaussMC con NNEDI3 OpenCL. Ogni ramo viene convertito a `YUV420P10` con `fmtc`; se `--resize` e' attivo, il resize viene fatto nello stesso pass `fmtc` del ramo. I segmenti vengono poi assemblati con `core.std.Splice`; solo dopo lo splice viene applicato `--yuv444`, sempre via `fmtc`. `AssumeFPS` nel VPY e' solo un tag tecnico per lo stream nella pipeline VFR; in `--bob` globale viene impostato al rapporto richiesto e diventa coerente con il mux CFR.
-
-In modalita' normale `VSPipe` invia Y4M all'encoder configurato, poi `mkvmerge` muxa video, timecode VFR, audio e sottotitoli sorgenti. In `--bob` globale `mkvmerge` usa invece `--default-duration` con il rapporto FPS richiesto. In `--analyze-only` la pipeline si ferma prima dell'encode ma produce comunque il report tecnico su standard output. In `--report`, invece, non viene rieseguita nessuna decisione: si misura soltanto il file finale gia' prodotto.
-
-## Struttura del codice
+## Struttura del progetto
 
 ```text
 anime_vfr.py   entrypoint CLI
-pipeline.py    orchestrazione, pass TIVTC, classificatore e VPY finale
-config.py      path binari e parametri della pipeline
-media.py       metadata video e timestamps sorgente
-segments.py    framemap e segmentazione film/bob
-dedup.py       dedup sui segmenti film
-timecodes.py   generazione timecode VFR finali
-report.py      report analyze-only e report posteriori
-encode.py      encode e mux finale
-utils.py       helper condivisi
+pipeline.py    analisi, classificazione e orchestrazione
+branches.py    costruzione dei rami TFM/TDecimate
+segments.py    mapping e segmentazione operativa
+dedup.py       dedup sui rami selezionati
+timecodes.py   validazione PTS e timecode finali
+report.py      report pre-encode e post-encode
+media.py       metadata e timestamp sorgente
+encode.py      encode e mux
+contracts.py   contratti e validazione runtime
+config.py      binari e parametri configurabili
 ```
-
-## Note operative
-
-- Il modello finale e' sempre binario: 24p film o 60p bob.
-- `--analyze-only` e' il modo corretto per validare una sorgente nuova prima dell'encode.
-- `--report` serve solo sui file gia' prodotti: misura i timestamps del MKV, non ripete la classificazione.
-- `--resize` imposta una risoluzione esatta; non calcola automaticamente il DAR dal SAR.
-- `--yuv444` viene applicato dopo Vinverse, bob, resize e assemblaggio segmenti.
-- Il dedup e' applicato solo ai segmenti film e modifica il numero di frame video, non la durata temporale.
-- `--progressive-dedup` applica lo stesso principio a sorgenti gia' progressive, senza classificazione 24/60.
-- Gli script `--additional-vpy` devono mantenere invariati numero e ordine dei frame; se passi `--yuv444`, ricevono `clip` gia' in `YUV444P10`.
-- Se cambi encoder, aggiorna insieme `ENCODER_BIN` e `ENCODER_PARAMS` in `config.py`.
 
 ## Licenza
 
-Questo progetto e' distribuito sotto licenza GNU General Public License v3.0. Vedi `LICENSE`.
+GNU General Public License v3.0. Vedi [LICENSE](LICENSE).
 
 ## Buy me a coffee!
 
-[!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/simonefil)
+[![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/simonefil)

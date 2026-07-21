@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Lettura metadata video ed estrazione dei timestamp sorgente."""
+"""Video metadata inspection and source timestamp extraction."""
 
 from fractions import Fraction
 import json
 import subprocess
 import xml.etree.ElementTree as ET
 
-from config import MEDIAINFO, MKVEXTRACT
+from config import FFPROBE, MEDIAINFO, MKVEXTRACT
 
 
 def get_video_info(source):
-    """Legge dimensioni codificate e sample aspect ratio della prima traccia video."""
+    """Read coded dimensions and sample aspect ratio from the first video track."""
     cmd = [MEDIAINFO, "--Output=JSON", str(source)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"mediainfo fallito: {result.stderr}")
+        raise RuntimeError(f"mediainfo failed: {result.stderr}")
     info = json.loads(result.stdout)
     track = next(t for t in info["media"]["track"] if t["@type"] == "Video")
     w = int(track["Width"])
@@ -25,7 +25,7 @@ def get_video_info(source):
 
 
 def get_video_frame_count(source):
-    """Legge il numero reale di frame della prima traccia video."""
+    """Read the actual frame count of the first video track."""
     try:
         import vapoursynth as vs
 
@@ -37,7 +37,7 @@ def get_video_frame_count(source):
     cmd = [MEDIAINFO, "--Output=JSON", str(source)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"mediainfo fallito: {result.stderr}")
+        raise RuntimeError(f"mediainfo failed: {result.stderr}")
     info = json.loads(result.stdout)
     track = next(t for t in info["media"]["track"] if t["@type"] == "Video")
     frame_count = track.get("FrameCount")
@@ -45,19 +45,58 @@ def get_video_frame_count(source):
 
 
 def extract_source_timecodes(source_path, output_path):
-    """Estrae i timestamps_v2 della traccia video da un MKV sorgente."""
+    """Extract v2 timestamps from the source MKV video track."""
     cmd = [MKVEXTRACT, str(source_path), "timestamps_v2", f"0:{output_path}"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"mkvextract timestamps fallito: {result.stderr}")
+        raise RuntimeError(f"mkvextract timestamps failed: {result.stderr}")
+
+
+def get_video_field_metadata(source_path, frame_count):
+    """Read repeat_pict and top_field_first for each frame through ffprobe."""
+    cmd = [
+        FFPROBE,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "frame=repeat_pict,top_field_first",
+        "-of", "json",
+        str(source_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe field metadata failed: {result.stderr}")
+    frames = json.loads(result.stdout).get("frames", [])
+    if len(frames) != frame_count:
+        raise RuntimeError(
+            f"Invalid field metadata cardinality: {len(frames)} records for {frame_count} frames"
+        )
+
+    metadata = []
+    for index, frame in enumerate(frames):
+        missing = [key for key in ("repeat_pict", "top_field_first") if key not in frame]
+        if missing:
+            raise RuntimeError(f"Missing field metadata at frame {index}: {', '.join(missing)}")
+        repeat_pict = int(frame["repeat_pict"])
+        top_field_first = int(frame["top_field_first"])
+        if repeat_pict not in (0, 1):
+            raise RuntimeError(f"Unsupported repeat_pict at frame {index}: {repeat_pict}")
+        if top_field_first not in (0, 1):
+            raise RuntimeError(
+                f"Invalid top_field_first at frame {index}: {top_field_first}"
+            )
+        metadata.append({
+            "repeat_pict": repeat_pict,
+            "top_field_first": bool(top_field_first),
+        })
+    return metadata
 
 
 def extract_chapter_ranges(source_path, output_path):
-    """Estrae i capitoli Matroska e restituisce range temporali in millisecondi."""
+    """Extract Matroska chapters and return time ranges in milliseconds."""
     cmd = [MKVEXTRACT, str(source_path), "chapters", str(output_path)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"mkvextract chapters fallito: {result.stderr}")
+        raise RuntimeError(f"mkvextract chapters failed: {result.stderr}")
     if not output_path.exists() or output_path.stat().st_size == 0:
         return []
 
@@ -73,7 +112,7 @@ def extract_chapter_ranges(source_path, output_path):
 
 
 def _chapter_timestamp_to_ms(value):
-    """Converte hh:mm:ss.nnnnnnnnn dei capitoli Matroska in millisecondi."""
+    """Convert Matroska chapter timestamps to milliseconds."""
     hms, _, frac = value.partition(".")
     h, m, s = hms.split(":")
     frac = (frac + "000000000")[:9]

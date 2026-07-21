@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Codifica video, mappatura dei metadata colore e mux finale MKV."""
+"""Video encoding, color metadata mapping, and final MKV muxing."""
 
 import json
 from pathlib import Path
+import shlex
 import subprocess
 
 from config import ENCODER_BIN, ENCODER_PARAMS, FFMPEG, MEDIAINFO, MKVMERGE, VSPIPE
@@ -35,7 +36,7 @@ _TRANSFER_MAP = {
 
 
 def get_color_flags(source_path, is_ffmpeg):
-    """Mappa i metadata colore sorgente sui flag dell'encoder selezionato."""
+    """Map source color metadata to flags for the selected encoder."""
     result = subprocess.run([MEDIAINFO, "--Output=JSON", str(source_path)], capture_output=True, text=True)
     info = json.loads(result.stdout)
     vtrack = next((t for t in info["media"]["track"] if t["@type"] == "Video"), {})
@@ -65,7 +66,7 @@ def get_color_flags(source_path, is_ffmpeg):
 
 
 def get_par_flags(sar_num, sar_den, is_ffmpeg):
-    """Mappa il sample aspect ratio sorgente sui flag dell'encoder selezionato."""
+    """Map the source sample aspect ratio to selected-encoder flags."""
     if sar_num == sar_den:
         return ""
     if is_ffmpeg:
@@ -74,7 +75,7 @@ def get_par_flags(sar_num, sar_den, is_ffmpeg):
 
 
 def get_chroma_flags(output_yuv444, is_ffmpeg):
-    """Mappa il chroma output richiesto sui flag dell'encoder selezionato."""
+    """Map the requested output chroma format to selected-encoder flags."""
     if not output_yuv444:
         return ""
     if is_ffmpeg:
@@ -83,41 +84,39 @@ def get_chroma_flags(output_yuv444, is_ffmpeg):
 
 
 def encode(vs_script, encoded_video, color_flags="", par_flags="", chroma_flags=""):
-    """Invia l'output Y4M di VapourSynth all'encoder configurato."""
+    """Pipe VapourSynth Y4M output to the configured encoder."""
     vspipe_cmd = [VSPIPE, "-c", "y4m", str(vs_script), "-"]
     is_ffmpeg = "ffmpeg" in ENCODER_BIN.lower()
-    params = ENCODER_PARAMS
-    if color_flags:
-        params += f" {color_flags}"
-    if par_flags:
-        params += f" {par_flags}"
-    if chroma_flags:
-        params += f" {chroma_flags}"
+    params = shlex.split(ENCODER_PARAMS)
+    for extra_flags in (color_flags, par_flags, chroma_flags):
+        if extra_flags:
+            params.extend(shlex.split(extra_flags))
     if is_ffmpeg:
-        enc_cmd = [ENCODER_BIN] + params.split() + [str(encoded_video)]
+        enc_cmd = [ENCODER_BIN] + params + [str(encoded_video)]
     else:
-        enc_cmd = [ENCODER_BIN] + params.split() + ["-o", str(encoded_video)]
+        enc_cmd = [ENCODER_BIN] + params + ["-o", str(encoded_video)]
     print(f"  Encode: vspipe | {Path(ENCODER_BIN).stem}")
-    vspipe_proc = subprocess.Popen(vspipe_cmd, stdout=subprocess.PIPE)
-    enc_proc = subprocess.Popen(enc_cmd, stdin=vspipe_proc.stdout)
-    vspipe_proc.stdout.close()
-    enc_proc.communicate()
-    if enc_proc.returncode != 0:
-        raise RuntimeError(f"Encoder fallito con codice {enc_proc.returncode}")
+    vspipe_proc = None
+    encoder_proc = None
+    try:
+        vspipe_proc = subprocess.Popen(vspipe_cmd, stdout=subprocess.PIPE)
+        encoder_proc = subprocess.Popen(enc_cmd, stdin=vspipe_proc.stdout)
+        vspipe_proc.stdout.close()
+        encoder_return_code = encoder_proc.wait()
+        vspipe_return_code = vspipe_proc.wait()
+    finally:
+        for process in (encoder_proc, vspipe_proc):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.wait()
+    if encoder_return_code != 0:
+        raise RuntimeError(f"Encoder failed with exit code {encoder_return_code}")
+    if vspipe_return_code != 0:
+        raise RuntimeError(f"vspipe failed with exit code {vspipe_return_code}")
 
 
-def mux_final(
-    encoded_video,
-    source_path,
-    timecodes_path,
-    output_mkv,
-    strip_audio,
-    strip_sub,
-    audio_range=None,
-    default_duration=None,
-    display_aspect_ratio=None,
-):
-    """Muxa video encodato e tracce sorgenti, usando timecode VFR o durata CFR."""
+def mux_final(encoded_video, source_path, timecodes_path, output_mkv, strip_audio, strip_sub, audio_range=None, default_duration=None, display_aspect_ratio=None):
+    """Mux encoded video and source tracks with VFR timecodes or CFR duration."""
     cmd = [
         MKVMERGE,
         "--output", str(output_mkv),
@@ -134,7 +133,8 @@ def mux_final(
         "--no-chapters",
         str(encoded_video),
     ])
-    if audio_range is not None:
+    trimmed_av = None
+    if audio_range is not None and not (strip_audio and strip_sub):
         ss_ts, to_ts = audio_range
         trimmed_av = Path(encoded_video).parent / "trimmed_av.mkv"
         av_cmd = [
@@ -143,18 +143,18 @@ def mux_final(
             "-ss", ss_ts,
             "-to", to_ts,
             "-i", str(source_path),
-            "-map", "0:a?",
-            "-map", "0:s?",
-            "-c", "copy",
-            "-vn",
-            str(trimmed_av),
         ]
-        print(f"  Trimming audio: {ss_ts} -> {to_ts}")
+        if not strip_audio:
+            av_cmd.extend(["-map", "0:a?"])
+        if not strip_sub:
+            av_cmd.extend(["-map", "0:s?"])
+        av_cmd.extend(["-c", "copy", "-vn", str(trimmed_av)])
+        print(f"  Trimming source tracks: {ss_ts} -> {to_ts}")
         result = subprocess.run(av_cmd)
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg audio trim fallito (rc={result.returncode})")
+            raise RuntimeError(f"ffmpeg source-track trim failed (rc={result.returncode})")
         cmd.extend(["--no-video", "--no-chapters", str(trimmed_av)])
-    else:
+    elif audio_range is None:
         source_flags = ["--no-video"]
         if strip_audio:
             source_flags.append("--no-audio")
@@ -166,6 +166,6 @@ def mux_final(
     print(f"  Mux: -> {Path(output_mkv).name}")
     result = subprocess.run(cmd)
     if result.returncode > 1:
-        raise RuntimeError(f"mkvmerge mux fallito (rc={result.returncode})")
-    if audio_range is not None and trimmed_av.exists():
+        raise RuntimeError(f"mkvmerge mux failed (rc={result.returncode})")
+    if trimmed_av is not None and trimmed_av.exists():
         trimmed_av.unlink()

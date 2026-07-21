@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Entrypoint da linea di comando per la pipeline anime_vfr."""
+"""Command-line entry point for the anime_vfr pipeline."""
 
 import sys
 from pathlib import Path
