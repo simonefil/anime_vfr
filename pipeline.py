@@ -82,17 +82,17 @@ def fmtc_to_yuv420p8(src):
     src = core.fmtc.resample(src, csp=vs.YUV420P16, kernel="spline16", cplaces="mpeg2", cplaced="mpeg2")
     return core.fmtc.bitdepth(src, bits=8)
 
-def fmtc_to_yuv420p10(src, width=None, height=None):
+def fmtc_prepare_output(src, width=None, height=None, crop_left=0, crop_right=0, crop_top=0, crop_bottom=0, output_yuv444=False):
     src = core.fmtc.bitdepth(src, bits=16)
-    if width is None or height is None:
-        src = core.fmtc.resample(src, csp=vs.YUV420P16, kernel="spline16", cplaces="mpeg2", cplaced="mpeg2")
-    else:
-        src = core.fmtc.resample(src, w=width, h=height, csp=vs.YUV420P16, kernel="spline16", cplaces="mpeg2", cplaced="mpeg2")
-    return core.fmtc.bitdepth(src, bits=10)
-
-def fmtc_to_yuv444p10(src):
-    src = core.fmtc.bitdepth(src, bits=16)
-    src = core.fmtc.resample(src, csp=vs.YUV444P16, kernel="spline16", cplaces="mpeg2", cplaced="mpeg2")
+    output_format = vs.YUV444P16 if output_yuv444 else vs.YUV420P16
+    if output_yuv444:
+        src = core.fmtc.resample(src, csp=output_format, kernel="spline16", cplaces="mpeg2", cplaced="mpeg2")
+    if crop_left or crop_right or crop_top or crop_bottom:
+        src = core.std.CropRel(src, left=crop_left, right=crop_right, top=crop_top, bottom=crop_bottom)
+    if width is not None and height is not None:
+        src = core.fmtc.resample(src, w=width, h=height, csp=output_format, kernel="spline16", cplaces="mpeg2", cplaced="mpeg2")
+    elif not output_yuv444:
+        src = core.fmtc.resample(src, csp=output_format, kernel="spline16", cplaces="mpeg2", cplaced="mpeg2")
     return core.fmtc.bitdepth(src, bits=10)
 '''
 
@@ -1413,7 +1413,7 @@ def run_multimetric_classification(source_path, work_dir, tfm_path, src_tc_path,
     return analysis_result
 
 
-def generate_pass2b_script(source_path, tfm_path, stats_path, segments: list[Segment], script_path, resize_w, resize_h, additional_vpy=None, frame_range=None, progressive_source=False, assume_fps_num=30000, assume_fps_den=1001, resize_enabled=False, output_yuv444=False, field_order="tff", vs_threads=None):
+def generate_pass2b_script(source_path, tfm_path, stats_path, segments: list[Segment], script_path, resize_w, resize_h, additional_vpy=None, frame_range=None, progressive_source=False, assume_fps_num=30000, assume_fps_den=1001, resize_enabled=False, crop_margins=None, output_yuv444=False, field_order="tff", vs_threads=None):
     """Generate the final VPY that assembles matched, decimated, and bob branches.
 
     AssumeFPS is only a technical tag for VFR output. Global ``--bob`` uses the
@@ -1429,15 +1429,10 @@ def generate_pass2b_script(source_path, tfm_path, stats_path, segments: list[Seg
     field = _field_order_settings(field_order)
     field_order_tff = field["tff"]
     fieldbased = 0 if progressive_source else field["fieldbased"]
-    final_420_line = (
-        f"{{name}} = fmtc_to_yuv420p10({{name}}, {resize_w}, {resize_h})\n"
-        if resize_enabled
-        else "{name} = fmtc_to_yuv420p10({name})\n"
-    )
-    yuv444_line = (
-        'clip = fmtc_to_yuv444p10(clip)\n'
-        if output_yuv444 else ""
-    )
+    crop_left, crop_right, crop_top, crop_bottom = crop_margins or (0, 0, 0, 0)
+    output_width = resize_w if resize_enabled else None
+    output_height = resize_h if resize_enabled else None
+    prepare_output_line = f"{{name}} = fmtc_prepare_output({{name}}, width={output_width!r}, height={output_height!r}, crop_left={crop_left}, crop_right={crop_right}, crop_top={crop_top}, crop_bottom={crop_bottom}, output_yuv444={output_yuv444!r})\n"
     matched_decimated_branch_builder = render_matched_decimated_branch_builder()
 
     script = f'''import vapoursynth as vs
@@ -1467,7 +1462,7 @@ segments = []
     if progressive_source:
         script += f'''
 progressive = core.std.SetFrameProp(clip, prop="_FieldBased", intval=0)
-{final_420_line.format(name="progressive")}\
+{prepare_output_line.format(name="progressive")}\
 '''
     elif need_matched:
         if tfm_path is None or stats_path is None:
@@ -1478,12 +1473,12 @@ progressive = core.std.SetFrameProp(clip, prop="_FieldBased", intval=0)
         script += f'''
 matched_decimated = build_matched_decimated_branches(core, clip, r"{tfm_esc}", {field["tfm_order"]}, r"{stats_esc}", r"{dummy_esc}", {need_decimated})
 matched = matched_decimated["matched"]
-{final_420_line.format(name="matched")}\
+{prepare_output_line.format(name="matched")}\
 '''
         if need_decimated:
             script += f'''
 decimated = matched_decimated["decimated"]
-{final_420_line.format(name="decimated")}\
+{prepare_output_line.format(name="decimated")}\
 '''
     if need_bob:
         if need_metadata_bob:
@@ -1494,15 +1489,15 @@ bob_source_tff = core.std.SetFrameProp(clip, prop="_FieldBased", intval=2)
 bob_source_bff = core.std.SetFrameProp(clip, prop="_FieldBased", intval=1)
 bobbed_tff = QTempGaussMC(bob_source_tff, basic_bobber=NNEDI3(nsize=4, nns=4, qual=2, opencl=True), tff=True, basic_tr=3, final_tr=2, source_match_mode=QTempGaussMC.SourceMatchMode.TWICE_REFINED).deinterlace()
 bobbed_bff = QTempGaussMC(bob_source_bff, basic_bobber=NNEDI3(nsize=4, nns=4, qual=2, opencl=True), tff=False, basic_tr=3, final_tr=2, source_match_mode=QTempGaussMC.SourceMatchMode.TWICE_REFINED).deinterlace()
-{final_420_line.format(name="bobbed_tff")}\
-{final_420_line.format(name="bobbed_bff")}\
+{prepare_output_line.format(name="bobbed_tff")}\
+{prepare_output_line.format(name="bobbed_bff")}\
 '''
         else:
             script += f'''
 from vsdeinterlace.qtgmc import QTempGaussMC
 from vsaa import NNEDI3
 bobbed = QTempGaussMC(clip, basic_bobber=NNEDI3(nsize=4, nns=4, qual=2, opencl=True), tff={field_order_tff}, basic_tr=3, final_tr=2, source_match_mode=QTempGaussMC.SourceMatchMode.TWICE_REFINED).deinterlace()
-{final_420_line.format(name="bobbed")}\
+{prepare_output_line.format(name="bobbed")}\
 '''
     for seg in segments:
         if seg["strategy"] in ("match_keep_pts", "match_decimate"):
@@ -1526,7 +1521,7 @@ bobbed = QTempGaussMC(clip, basic_bobber=NNEDI3(nsize=4, nns=4, qual=2, opencl=T
         else:
             raise ValueError(f"Unsupported segment strategy: {seg['strategy']}")
 
-    script += f'\nclip = core.std.Splice(segments)\n{yuv444_line}'
+    script += '\nclip = core.std.Splice(segments)\n'
 
     if additional_vpy is not None:
         with open(additional_vpy, "r", encoding="utf-8") as af:
@@ -1662,6 +1657,36 @@ def _parse_resize_spec(value):
     return width, height
 
 
+def _parse_crop_spec(value):
+    """Validate crop margins in LEFT:RIGHT:TOP:BOTTOM form."""
+    if value is None:
+        return None
+    parts = value.split(":")
+    if len(parts) != 4:
+        raise ValueError("--crop must use LEFT:RIGHT:TOP:BOTTOM form, for example 8:8:0:0")
+    try:
+        margins = tuple(int(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError("--crop must contain four integer pixel margins") from exc
+    if any(margin < 0 for margin in margins):
+        raise ValueError("--crop margins cannot be negative")
+    return margins
+
+
+def _validate_crop_geometry(crop_margins, width, height, output_yuv444):
+    """Return cropped dimensions after validating format alignment and bounds."""
+    if crop_margins is None:
+        return width, height
+    left, right, top, bottom = crop_margins
+    if not output_yuv444 and any(margin % 2 for margin in crop_margins):
+        raise ValueError("--crop margins must be even for YUV 4:2:0 output; use --yuv444 to allow odd margins")
+    cropped_width = width - left - right
+    cropped_height = height - top - bottom
+    if cropped_width <= 0 or cropped_height <= 0:
+        raise ValueError(f"--crop {left}:{right}:{top}:{bottom} removes the complete {width}x{height} frame")
+    return cropped_width, cropped_height
+
+
 def _parse_fps_ratio(value, option_name):
     """Validate a CLI frame-rate ratio such as 60000/1001."""
     raw = value.strip()
@@ -1700,7 +1725,7 @@ def _bob_ranges_from_chapters(source_path, work_dir, chapters):
     return ranges
 
 
-def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, additional_vpy=None, frame_range=None, bob=False, analyze_only=False, progressive_dedup=False, dedup_enabled=False, dedup_cap=None, bob_chapters=None, bob_ranges=None, resize_target=None, output_yuv444=False, field_order="tff", bob_fps=(60000, 1001), vs_threads=None, analysis_workers=None) -> EpisodeStats:
+def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, additional_vpy=None, frame_range=None, bob=False, analyze_only=False, progressive_dedup=False, dedup_enabled=False, dedup_cap=None, bob_chapters=None, bob_ranges=None, crop_margins=None, resize_target=None, output_yuv444=False, field_order="tff", bob_fps=(60000, 1001), vs_threads=None, analysis_workers=None) -> EpisodeStats:
     """Run source analysis, classification, segmentation, timecodes, and output."""
     stem = source_path.stem
     print(f"\n{'=' * 60}")
@@ -1711,21 +1736,25 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
 
     w, h, sar_num, sar_den = get_video_info(source_path)
     source_frame_count = get_video_frame_count(source_path)
+    cropped_w, cropped_h = _validate_crop_geometry(crop_margins, w, h, output_yuv444)
+    crop_description = ""
+    if crop_margins is not None and any(crop_margins):
+        crop_description = f" -> crop {cropped_w}x{cropped_h}"
     if resize_target is None:
-        resize_w, resize_h = w, h
+        resize_w, resize_h = cropped_w, cropped_h
         resize_enabled = False
         par_flags_enabled = sar_num != sar_den
         display_aspect_ratio = None
         if sar_num != sar_den:
-            dar = Fraction(w * sar_num, h * sar_den)
+            dar = Fraction(cropped_w * sar_num, cropped_h * sar_den)
             display_aspect_ratio = f"{dar.numerator}/{dar.denominator}"
-        print(f"  Source: {w}x{h} SAR {sar_num}:{sar_den} -> no resize")
+        print(f"  Source: {w}x{h} SAR {sar_num}:{sar_den}{crop_description} -> no resize")
     else:
         resize_w, resize_h = resize_target
         resize_enabled = True
         par_flags_enabled = False
         display_aspect_ratio = None
-        print(f"  Source: {w}x{h} SAR {sar_num}:{sar_den} -> {resize_w}x{resize_h}")
+        print(f"  Source: {w}x{h} SAR {sar_num}:{sar_den}{crop_description} -> {resize_w}x{resize_h}")
 
     src_tc_path = work_dir / f"{stem}_src_timecodes.txt"
     if not src_tc_path.exists():
@@ -1910,11 +1939,7 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
     vpy_path = work_dir / f"{stem}_pass2b.vpy"
     assume_fps_num = bob_fps[0] if bob else 30000
     assume_fps_den = bob_fps[1] if bob else 1001
-    generate_pass2b_script(source_path, tfm_path, stats_path, segments, vpy_path, resize_w, resize_h,
-                           additional_vpy, frame_range, progressive_source=progressive_dedup,
-                           assume_fps_num=assume_fps_num, assume_fps_den=assume_fps_den,
-                           resize_enabled=resize_enabled, output_yuv444=output_yuv444,
-                           field_order=field_order, vs_threads=vs_threads)
+    generate_pass2b_script(source_path, tfm_path, stats_path, segments, vpy_path, resize_w, resize_h, additional_vpy, frame_range, progressive_source=progressive_dedup, assume_fps_num=assume_fps_num, assume_fps_den=assume_fps_den, resize_enabled=resize_enabled, crop_margins=crop_margins, output_yuv444=output_yuv444, field_order=field_order, vs_threads=vs_threads)
 
     episode_stats: EpisodeStats = {
         "name": output_path.name,
@@ -2084,6 +2109,7 @@ def main():
     parser.add_argument("--progressive-dedup", nargs="?", const="2", default=None, metavar="N", help="Deduplicate a progressive source; optional N is the maximum merged run and defaults to 2")
     parser.add_argument("--dedup", nargs="?", const="2", default=None, metavar="N", help="Enable dedup on matched/decimated segments; optional N is the maximum merged run and defaults to 2")
     parser.add_argument("--yuv444", action="store_true", help="Produce YUV 4:4:4 10-bit video instead of YUV 4:2:0 10-bit")
+    parser.add_argument("--crop", default=None, metavar="L:R:T:B", help="Crop pixels from left, right, top, and bottom before resize")
     parser.add_argument("--resize", default=None, metavar="WIDTHxHEIGHT", help="Resize output to WIDTHxHEIGHT, for example 768x576")
     parser.add_argument("--threads", default=None, metavar="N", help="Override VapourSynth and prefetch threads; defaults to os.cpu_count()")
     parser.add_argument("--analysis-workers", default=None, metavar="N", help="Override NumPy metric workers; defaults to --threads")
@@ -2126,6 +2152,7 @@ def main():
         if progressive_dedup_enabled: forbidden.append("--progressive-dedup")
         if dedup_enabled: forbidden.append("--dedup")
         if args.yuv444: forbidden.append("--yuv444")
+        if args.crop is not None: forbidden.append("--crop")
         if args.resize is not None: forbidden.append("--resize")
         if forbidden:
             print(f"Error: --report cannot be combined with: {', '.join(forbidden)}")
@@ -2139,6 +2166,7 @@ def main():
         bob_fps = _parse_fps_ratio(args.bob, "--bob") if bob_enabled else (60000, 1001)
         progressive_dedup_cap = _parse_dedup_cap(args.progressive_dedup, "--progressive-dedup")
         hybrid_dedup_cap = _parse_dedup_cap(args.dedup, "--dedup")
+        crop_margins = _parse_crop_spec(args.crop)
         resize_target = _parse_resize_spec(args.resize)
         vs_threads = _parse_positive_int(args.threads, "--threads")
         analysis_workers = _parse_positive_int(args.analysis_workers, "--analysis-workers")
@@ -2171,7 +2199,7 @@ def main():
         output_path = _output_path_for_source(current_source, output_dir, output_is_explicit)
         work_dir = _make_run_work_dir(work_root, current_source)
         print(f"  {current_source.name} -> {output_path.name}")
-        episode_stats = process_episode(current_source, output_path, work_dir, args.strip_audio, args.strip_sub, args.additional_vpy, frame_range, bob=bob_enabled, analyze_only=args.analyze_only, progressive_dedup=progressive_dedup_enabled, dedup_enabled=dedup_enabled, dedup_cap=dedup_cap, bob_chapters=bob_chapters, bob_ranges=bob_ranges, resize_target=resize_target, output_yuv444=args.yuv444, field_order=args.field_order, bob_fps=bob_fps, vs_threads=vs_threads, analysis_workers=analysis_workers)
+        episode_stats = process_episode(current_source, output_path, work_dir, args.strip_audio, args.strip_sub, args.additional_vpy, frame_range, bob=bob_enabled, analyze_only=args.analyze_only, progressive_dedup=progressive_dedup_enabled, dedup_enabled=dedup_enabled, dedup_cap=dedup_cap, bob_chapters=bob_chapters, bob_ranges=bob_ranges, crop_margins=crop_margins, resize_target=resize_target, output_yuv444=args.yuv444, field_order=args.field_order, bob_fps=bob_fps, vs_threads=vs_threads, analysis_workers=analysis_workers)
         all_stats.append(episode_stats)
         if not args.keep_work:
             _cleanup_work_dir(work_dir)

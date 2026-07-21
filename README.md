@@ -73,6 +73,7 @@ anime_vfr.py source [opzioni]
 | `--field-order tff\|bff` | Ordine dei field per TFM/QTGMC; default `tff`. |
 | `--progressive-dedup [N]` | Deduplica una sorgente già progressiva senza TIVTC o classificazione. |
 | `--dedup [N]` | Abilita il dedup opzionale sui segmenti matched/decimated. |
+| `--crop L:R:T:B` | Rimuove pixel dai quattro bordi prima del resize. |
 | `--resize WIDTHxHEIGHT` | Imposta la risoluzione esatta di output. |
 | `--yuv444` | Produce YUV 4:4:4 10 bit anziché YUV 4:2:0 10 bit. |
 | `--threads N` | Imposta i thread VapourSynth e prefetch; default `os.cpu_count()`. |
@@ -122,9 +123,18 @@ python3.14 anime_vfr.py "/path/episodio.mkv" --bob-range 22:30-23:50,10:00-10:20
 
 `--progressive-dedup [N]` applica soltanto dedup e timing a una sorgente già progressiva. Non deve essere usato su materiale ancora interlacciato o telecinato.
 
-### Resize, formato e filtri aggiuntivi
+### Crop, resize, formato e filtri aggiuntivi
 
-Senza `--resize` vengono mantenute le dimensioni codificate e il display aspect ratio sorgente. Con `--resize`, la risoluzione richiesta viene trattata come pixel quadrati: la pipeline non calcola automaticamente una risoluzione dal SAR.
+`--crop` usa il formato `LEFT:RIGHT:TOP:BOTTOM` e rimuove il numero indicato di pixel dai rispettivi bordi. Il crop viene applicato dopo il trattamento matched/decimated/bob e sempre prima del resize. Senza `--resize`, la risoluzione finale è quella ritagliata e mantiene il SAR sorgente; con `--resize`, l'ordine è `crop → resize` e la risoluzione richiesta viene trattata come pixel quadrati.
+
+Con output YUV 4:2:0 i quattro margini devono essere pari per rispettare il sottocampionamento chroma. Con `--yuv444` sono accettati anche margini dispari: ogni ramo viene convertito in 4:4:4 prima del crop.
+
+```bash
+python3.14 anime_vfr.py "/path/episodio.mkv" --crop 8:8:0:0
+python3.14 anime_vfr.py "/path/episodio.mkv" --crop 7:9:1:3 --resize 768x576 --yuv444
+```
+
+La pipeline non modifica la geometria interna dei sottotitoli. ASS posizionali, PGS e VobSub possono quindi richiedere un adattamento separato dopo crop o resize.
 
 `--additional-vpy` viene eseguito dopo assemblaggio, resize e conversione nel formato richiesto. Lo snippet riceve `clip`, deve riassegnarlo e non deve cambiare numero o ordine dei frame, perché i timecode sono già stati calcolati. Non deve chiamare `set_output()`.
 
