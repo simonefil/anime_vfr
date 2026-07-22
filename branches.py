@@ -4,11 +4,11 @@
 import inspect
 
 
-def build_matched_decimated_branches(core, clip, tfm_path, tfm_order, stats_path=None, mkvout_path=None, need_decimated=False):
+def build_matched_decimated_branches(core, clip, tfm_path, tfm_order, stats_path=None, mkvout_path=None, need_decimated=False, tfm_cthresh=8, tfm_mi=32, tfm_slow=2):
     """Build matched and optional decimated branches from the same TIVTC recipe."""
     from vsdeinterlace import vinverse
 
-    matched_raw = core.tivtc.TFM(clip, order=tfm_order, cthresh=8, input=str(tfm_path))
+    matched_raw = core.tivtc.TFM(clip, order=tfm_order, cthresh=tfm_cthresh, MI=tfm_mi, slow=tfm_slow, input=str(tfm_path))
     matched_vinverse = vinverse(matched_raw, contra_str=2.7, amnt=255, scl=0.25)
     matched = core.std.ModifyFrame(matched_raw, [matched_raw, matched_vinverse], lambda n, f: f[1].copy() if f[0].props.get("_Combed", 0) else f[0].copy())
     branches = {"matched": matched}

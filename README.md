@@ -154,9 +154,11 @@ Audio e sottotitoli vengono ritagliati in stream copy usando gli stessi limiti t
 
 La pipeline separa matchability, ridondanza e cadenza osservata. TDecimate viene usato soltanto nei run matchable per i quali esiste un mapping di ridondanza validato; negli altri run ricostruibili vengono conservati tutti i PTS.
 
+TFM sceglie il match primario. Un secondo controllo più sensibile misura l'eventuale combing residuo su quello stesso match senza sceglierne uno alternativo: un veto confermato forza il bob. Veto vicini vengono trattati come un'unica regione interlacciata, ma il bridge non assorbe più di circa un secondo di frame puliti. Le run sorgente RFF esplicite, pulite e sostenute vengono riconosciute dalla cadenza alternata di due e tre field e usano una soglia dedicata per evitare falsi bob.
+
 Le transizioni tra matched e bob vengono chiuse usando le dipendenze dei field indicate dai match TFM, evitando che un frame ricostruito usi un field appartenente al lato bob della frontiera.
 
-I timecode finali derivano dalla timeline sorgente. Il file V2 contiene un timestamp per ogni frame output più un timestamp terminale, necessario per conservare esattamente anche la durata dell'ultimo frame dopo bob, decimazione, dedup o `--frames`. Una durata non quantizzabile può essere mantenuta nei percorsi matched, ma impedisce il bob sicuro di quel frame.
+I timecode finali derivano dalla timeline sorgente e il file V2 contiene esattamente un timestamp per ogni frame output. `match_keep_pts` conserva i PTS sorgente, `bob_expand` suddivide ogni durata nei relativi field e `match_decimate` avanza usando le durate razionali prodotte da TDecimate, riallineandosi ai confini temporali sorgente. La decimazione viene mantenuta soltanto su cicli IVTC completi e temporalmente compatibili. Una durata non quantizzabile può essere mantenuta nei percorsi matched, ma impedisce il bob sicuro di quel frame.
 
 ## Output e file di lavoro
 

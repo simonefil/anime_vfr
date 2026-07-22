@@ -154,9 +154,11 @@ Audio and subtitles are stream-copied over the same time bounds used for video. 
 
 The pipeline separates matchability, redundancy, and observed cadence. TDecimate is used only in matchable runs with a validated redundancy mapping; other reconstructable runs preserve every PTS.
 
+TFM selects the primary match. A second, more sensitive check measures residual combing on that same match without selecting an alternative one; a confirmed veto forces bob processing. Nearby vetoes are treated as one interlaced region, but bridging never absorbs more than about one second of clean frames. Sustained, clean source runs with an explicit alternating two/three-field RFF cadence are recognized separately and use a dedicated threshold to prevent false bob decisions.
+
 Transitions between matched and bob output are closed using the field dependencies expressed by TFM matches, preventing a reconstructed frame from using a field that belongs to the bob side of the boundary.
 
-Final timecodes derive from the source timeline. The V2 file contains one timestamp per output frame plus a terminal timestamp, which preserves the exact final-frame duration after bob, decimation, dedup, or `--frames`. An unquantizable duration can be preserved by matched paths, but prevents safe bob processing of that frame.
+Final timecodes derive from the source timeline, and the V2 file contains exactly one timestamp per output frame. `match_keep_pts` preserves source PTS values, `bob_expand` divides each duration into its constituent fields, and `match_decimate` advances with the rational durations produced by TDecimate while realigning at source-time boundaries. Decimation is retained only across complete, temporally compatible IVTC cycles. An unquantizable duration can be preserved by matched paths, but prevents safe bob processing of that frame.
 
 ## Output and work files
 

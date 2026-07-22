@@ -16,10 +16,20 @@ ENCODER_PARAMS = (
     "-c:v libx265 -preset fast -crf 20"
 )
 
-# Multi-metric classifier parameters. These define public default behavior and
-# should only be changed after comparison against regression samples.
-MM_VERIFY_MIN_SIZE = 50
-MM_VERIFY_MIN_MOTION = 5
+# TFM comb detection. MI is the maximum allowed concentration of combed pixels
+# in a 16x16 block before the selected match becomes a hard bob veto.
+MM_TFM_CTHRESH = 8
+MM_TFM_MI = 32
+MM_TFM_SLOW = 2
+
+# Recheck every primary TFM weave with the more sensitive alternate comb
+# metric. This pass never selects a match: it only vetoes the match already
+# selected by the primary TFM pass when its luma MIC exceeds this limit.
+MM_TFM_WEAVE_CTHRESH = 8
+MM_TFM_WEAVE_MI = 16
+MM_TFM_WEAVE_METRIC = 1
+MM_TFM_WEAVE_RFF_MI = 25
+MM_TFM_WEAVE_RFF_MIN_RUN = 12
 
 # Per-frame NumPy metrics release the GIL and scale well in parallel.
 # None uses the same worker count selected for VapourSynth and prefetch.
@@ -28,15 +38,16 @@ MM_ANALYSIS_MAX_WORKERS = None
 # Conservative matchable anchors used during initial shadow classification.
 # An anchor requires a sustained run of valid, clean TFM records, bounded MIC,
 # non-static motion, and no local bob veto. PTS cadence does not decide this.
-MM_MATCHABLE_MIC_MAX = 32
 MM_MATCHABLE_MIN_RUN = 12
 MM_MATCHABLE_MIN_MOTION = 5
 MM_MATCHABLE_BOB_EDGE_GUARD = 3
 
-# Conservative recovery of islands caused by MIC outliers inside agreeing
-# matchable runs. MIC remains a soft signal: recovery requires clean weavable
-# TFM records, no bob lock, and a bounded share of MIC outliers.
-MM_MATCHABLE_SOFT_GAP_MIC_RATIO_MAX = 0.35
+# Residual-combing anchors close enough to belong to one temporal region are
+# bridged through low-information or clean-match gaps. Never absorb more than
+# about one second of clean NTSC source frames between hard bob anchors.
+MM_BOB_REGION_MAX_ANCHOR_GAP = 30
+
+# Low-information runs may inherit a surrounding deterministic state.
 MM_LOW_INFORMATION_MOTION_MAX = 2
 MM_LOW_INFORMATION_INHERIT_MAX = 30
 
@@ -47,6 +58,15 @@ MM_REDUNDANCY_MIN_RUN = 50
 MM_REDUNDANCY_DROP_RATIO_MIN = 0.12
 MM_REDUNDANCY_DROP_RATIO_MAX = 0.28
 MM_REDUNDANCY_DROP_DIFF_MAX = 5
+
+# TDecimate mode 5 uses the default five-frame IVTC cycle and removes one
+# duplicate from every film cycle. Partial boundary cycles fall back to bob.
+# Extracted Matroska source timestamps are normally quantized to milliseconds,
+# so a complete NTSC cycle can differ from its exact rational duration by just
+# under one millisecond.
+MM_TDECIMATE_CYCLE = 5
+MM_TDECIMATE_CYCLE_DROP = 1
+PTS_DECIMATE_CYCLE_TOLERANCE_MS = 1.0
 
 # Detection of interlaced vertical scrolling, typically white-on-black credits.
 # The metric looks for consecutive fields that align much better after a

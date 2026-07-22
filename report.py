@@ -316,17 +316,6 @@ def _build_decision_intervals(segments: list[Segment], timeline: SourceTimeline)
             source_rate = source_frames * 1000.0 / duration_ms
             base_output_rate = base_output_frames * 1000.0 / duration_ms
             final_output_rate = final_output_frames * 1000.0 / duration_ms
-            confidence_values = _segment_range_values(
-                segment, "frame_confidence", start, end
-            )
-            confidence = "-"
-            if confidence_values:
-                minimum = min(confidence_values)
-                maximum = max(confidence_values)
-                confidence = (
-                    f"{minimum:.3f}"
-                    if minimum == maximum else f"{minimum:.3f}-{maximum:.3f}"
-                )
             output_start = output_cursor
             output_end = output_cursor + final_output_frames - 1
             output_cursor += final_output_frames
@@ -361,7 +350,6 @@ def _build_decision_intervals(segments: list[Segment], timeline: SourceTimeline)
                 "redundancy_origins": _joined_values(
                     segment, "frame_redundancy_origins", start, end
                 ),
-                "confidence": confidence,
                 "locks": _lock_description(segment, start, end),
             })
     return intervals
@@ -392,7 +380,7 @@ def _print_decision_intervals(intervals):
         )
         print(
             f"       decision: matchability={interval['matchability']}; redundancy={interval['redundancy']}; "
-            f"confidence={interval['confidence']}; lock={interval['locks']}"
+            f"lock={interval['locks']}"
         )
         print(
             f"       reasons: classifier={interval['classifier_origins']}; mapping={interval['redundancy_origins']}"
@@ -413,15 +401,18 @@ def print_strategy_analyze_report(stem, segments: list[Segment], src_tc_path, tc
     drop_values = [bucket["drops"] for bucket in buckets]
     total_output = sum(row["final_output_frames"] for row in summary_rows)
     final_timestamps = read_timecodes_v2(tc_final)
-    final_timecode_count = len(final_timestamps) - 1
+    final_timecode_count = len(final_timestamps)
 
     if final_timecode_count != total_output:
         raise RuntimeError(
             f"Report mismatch: {final_timecode_count} timecodes for "
             f"{total_output} output frames"
         )
-    if not final_timestamps or final_timestamps[-1] <= final_timestamps[-2]:
-        raise RuntimeError("Report timecodes have no valid terminal timestamp")
+    if not final_timestamps or any(
+        final_timestamps[index] <= final_timestamps[index - 1]
+        for index in range(1, len(final_timestamps))
+    ):
+        raise RuntimeError("Report timecodes are empty or non-increasing")
     if decision_intervals and decision_intervals[-1]["output_end"] + 1 != total_output:
         raise RuntimeError("Report intervals do not cover the complete output timeline")
 

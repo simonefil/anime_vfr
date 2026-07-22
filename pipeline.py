@@ -21,19 +21,26 @@ from config import (
     MM_DEDUP_CAP,
     MM_DEDUP_ENABLED,
     MM_ANALYSIS_MAX_WORKERS,
+    MM_BOB_REGION_MAX_ANCHOR_GAP,
     MM_MATCHABLE_BOB_EDGE_GUARD,
-    MM_MATCHABLE_MIC_MAX,
     MM_MATCHABLE_MIN_MOTION,
     MM_MATCHABLE_MIN_RUN,
-    MM_MATCHABLE_SOFT_GAP_MIC_RATIO_MAX,
     MM_LOW_INFORMATION_INHERIT_MAX,
     MM_LOW_INFORMATION_MOTION_MAX,
     MM_REDUNDANCY_DROP_DIFF_MAX,
     MM_REDUNDANCY_DROP_RATIO_MAX,
     MM_REDUNDANCY_DROP_RATIO_MIN,
     MM_REDUNDANCY_MIN_RUN,
-    MM_VERIFY_MIN_MOTION,
-    MM_VERIFY_MIN_SIZE,
+    MM_TDECIMATE_CYCLE,
+    MM_TDECIMATE_CYCLE_DROP,
+    MM_TFM_CTHRESH,
+    MM_TFM_MI,
+    MM_TFM_SLOW,
+    MM_TFM_WEAVE_CTHRESH,
+    MM_TFM_WEAVE_METRIC,
+    MM_TFM_WEAVE_MI,
+    MM_TFM_WEAVE_RFF_MI,
+    MM_TFM_WEAVE_RFF_MIN_RUN,
     MM_VERTICAL_SCROLL_BEST_MAX,
     MM_VERTICAL_SCROLL_DIRECT_MIN,
     MM_VERTICAL_SCROLL_ENABLED,
@@ -45,6 +52,7 @@ from config import (
     MM_VERTICAL_SCROLL_SOFT_IMPROVEMENT_MIN,
     MM_VERTICAL_SCROLL_SHIFT,
     MM_VERTICAL_SCROLL_WINDOW,
+    PTS_DECIMATE_CYCLE_TOLERANCE_MS,
     PYTHON_BIN,
     VSPIPE,
 )
@@ -69,6 +77,7 @@ from segments import (
 from timecodes import (
     generate_final_timecodes_v2,
     segment_output_frame_count,
+    source_end_ms,
     validate_source_timeline,
 )
 from utils import (
@@ -145,7 +154,7 @@ core.num_threads = {n_threads}
 clip = core.bs.VideoSource(r"{source_esc}")
 clip = core.std.SetFrameProp(clip, prop="_FieldBased", intval={field["fieldbased"]})
 clip = fmtc_to_yuv420p8(clip)
-clip = core.tivtc.TFM(clip, order={field["tfm_order"]}, cthresh=8, output=r"{tfm_esc}")
+clip = core.tivtc.TFM(clip, order={field["tfm_order"]}, cthresh={MM_TFM_CTHRESH}, MI={MM_TFM_MI}, slow={MM_TFM_SLOW}, output=r"{tfm_esc}")
 clip = core.tivtc.TDecimate(clip, mode=4, output=r"{stats_esc}")
 clip.set_output(0)
 '''
@@ -199,20 +208,28 @@ def set_fn(n, f):
     return fout
 clip = core.std.ModifyFrame(clip, clip, set_fn)
 
-clip = core.tivtc.TFM(clip, order={field["tfm_order"]}, cthresh=8, input=r"{tfm_esc}")
+clip = core.tivtc.TFM(clip, order={field["tfm_order"]}, cthresh={MM_TFM_CTHRESH}, MI={MM_TFM_MI}, slow={MM_TFM_SLOW}, input=r"{tfm_esc}")
 clip = core.tivtc.TDecimate(clip, mode=5, hybrid=2, vfrDec=1, input=r"{stats_esc}", tfmIn=r"{tfm_esc}", mkvOut=r"{tc_esc}")
 
 with open(r"{fm_esc}", "w") as output_file:
     for output_index, frame in enumerate(clip.frames(prefetch={n_threads})):
         source_index = frame.props["_OrigFrameNum"]
+        duration_numerator = frame.props["_DurationNum"]
         duration_denominator = frame.props["_DurationDen"]
         combed = frame.props.get("_Combed", 0)
-        output_file.write(f"{{output_index}},{{source_index}},{{duration_denominator}},{{combed}}\\n")
+        output_file.write(f"{{output_index}},{{source_index}},{{duration_numerator}},{{duration_denominator}},{{combed}}\\n")
 print(f"Framemap: {{clip.num_frames}} frames")
 '''
-    if tc_v1_path.exists() and framemap_path.exists():
+    framemap_is_current = False
+    if framemap_path.exists():
+        with open(framemap_path, "r", encoding="utf-8") as existing_framemap:
+            first_row = next((line.strip() for line in existing_framemap if line.strip()), "")
+        framemap_is_current = len(first_row.split(",")) == 5
+    if tc_v1_path.exists() and framemap_is_current:
         print("  Pass 2a: existing files found, reusing them...")
         return tc_v1_path, framemap_path
+    if framemap_path.exists() and not framemap_is_current:
+        print("  Pass 2a: legacy framemap has no exact duration rationals, regenerating it...")
     with open(mapper_script, "w", encoding="utf-8") as f:
         f.write(mapper_content)
 
@@ -231,19 +248,27 @@ print(f"Framemap: {{clip.num_frames}} frames")
 # TFM AND TEMPORAL CLASSIFIER
 # Operational decisions use structured TFM records, same-parity motion,
 # sustained vertical scrolling, source PTS boundaries, and matched-branch
-# temporal differences. Slow local TFM verifies unresolved clean candidates.
+# temporal differences. A sensitive MIC pass vetoes residual combing on the
+# exact match selected by the primary TFM pass.
 # ═════════════════════════════════════════════════════════════════════════
 
 TFM_RECORD_RE = re.compile(
     r"^\s*(?P<index>\d+)\s+(?P<match>\S+)\s+(?P<combed>[+-])(?:\s+\[(?P<mic>\d+)\])?\s*$"
 )
 TFM_WEAVABLE_MATCHES = frozenset(("p", "c", "n", "b", "u"))
+TFM_MATCH_MIC_INDEX = {
+    "p": 0,
+    "c": 1,
+    "n": 2,
+    "b": 3,
+    "u": 4,
+}
 
 
 def parse_tfm_records(tfm_path, frame_count):
     """Read the TFM log while preserving source-frame alignment."""
     records = [
-        {"index": index, "match": None, "combed": None, "mic": None, "valid": False}
+        {"index": index, "match": None, "combed": None, "valid": False}
         for index in range(frame_count)
     ]
     diagnostics = {
@@ -282,7 +307,6 @@ def parse_tfm_records(tfm_path, frame_count):
                 "index": index,
                 "match": match.group("match"),
                 "combed": match.group("combed") == "+",
-                "mic": int(mic_text) if mic_text is not None else None,
                 "valid": mic_text is not None,
             }
             diagnostics["parsed"] += 1
@@ -290,6 +314,90 @@ def parse_tfm_records(tfm_path, frame_count):
                 diagnostics["incomplete"] += 1
     diagnostics["missing"] = sum(1 for record in records if record["match"] is None)
     return records, diagnostics
+
+
+def _scan_selected_weave_combing(clip, tfm_records, field, n_threads):
+    """Measure combing on the primary TFM match without selecting a new match."""
+    import vapoursynth as vs
+
+    core = vs.core
+    sensitive = core.tivtc.TFM(
+        clip,
+        order=field["tfm_order"],
+        mode=1,
+        PP=1,
+        cthresh=MM_TFM_WEAVE_CTHRESH,
+        MI=MM_TFM_WEAVE_MI,
+        slow=MM_TFM_SLOW,
+        metric=MM_TFM_WEAVE_METRIC,
+        chroma=False,
+        micout=2,
+    )
+    selected_mics = [None] * len(tfm_records)
+
+    for index, frame in enumerate(sensitive.frames(prefetch=n_threads)):
+        match_index = TFM_MATCH_MIC_INDEX.get(tfm_records[index]["match"])
+        if match_index is None:
+            continue
+        mics = frame.props["TFMMics"]
+        selected_mic = int(mics[match_index])
+        selected_mics[index] = selected_mic
+
+    return selected_mics
+
+
+def _explicit_rff_run_mask(timeline, tfm_records):
+    """Identify sustained clean source runs with an explicit 2/3-field RFF cadence."""
+    frame_count = len(tfm_records)
+    field_units = timeline["field_units"]
+    quantization_valid = timeline["quantization_valid"]
+    if len(field_units) != frame_count or len(quantization_valid) != frame_count:
+        raise RuntimeError("RFF evidence arrays do not share the TFM record cardinality")
+
+    eligible = [
+        (
+            quantization_valid[index] and
+            field_units[index] in {2, 3} and
+            record["valid"] and
+            not record["combed"] and
+            record["match"] in TFM_WEAVABLE_MATCHES
+        )
+        for index, record in enumerate(tfm_records)
+    ]
+    rff_mask = [False] * frame_count
+    index = 0
+    while index < frame_count:
+        if not eligible[index]:
+            index += 1
+            continue
+        start = index
+        previous_units = field_units[index]
+        index += 1
+        while (
+            index < frame_count and
+            eligible[index] and
+            field_units[index] != previous_units
+        ):
+            previous_units = field_units[index]
+            index += 1
+        if index - start >= MM_TFM_WEAVE_RFF_MIN_RUN:
+            rff_mask[start:index] = [True] * (index - start)
+    return rff_mask
+
+
+def _selected_weave_vetoes(selected_mics, explicit_rff_mask):
+    """Apply the sensitive MIC veto with a relaxed limit on explicit clean RFF runs."""
+    if len(selected_mics) != len(explicit_rff_mask):
+        raise RuntimeError("Selected-weave MIC and RFF evidence cardinalities do not match")
+    thresholds = [
+        MM_TFM_WEAVE_RFF_MI if is_explicit_rff else MM_TFM_WEAVE_MI
+        for is_explicit_rff in explicit_rff_mask
+    ]
+    vetoes = [
+        mic is not None and mic > threshold
+        for mic, threshold in zip(selected_mics, thresholds)
+    ]
+    return vetoes, thresholds
 
 
 def _source_frame_metrics(arr, previous_arr, field_order_tff):
@@ -375,18 +483,15 @@ def _build_multimetric_evidence(motion_arr, vertical_scroll_mask, timeline):
     }
 
 
-def _build_shadow_strategy(tfm_records, motion_arr, evidence, verified_matchable_mask=None) -> ShadowResult:
+def _build_shadow_strategy(tfm_records, sensitive_combed_vetoes, motion_arr, evidence) -> ShadowResult:
     """Build matchability anchors from sustained agreement between independent metrics."""
     frame_count = len(tfm_records)
-    if verified_matchable_mask is None:
-        verified_matchable_mask = [False] * frame_count
     matchability = ["unknown"] * frame_count
     redundancy = [None] * frame_count
     redundancy_origins = [None] * frame_count
     redundancy_mapping = [None] * frame_count
     strategies = ["bob_expand"] * frame_count
     shadow_origins = ["fallback_unknown"] * frame_count
-    confidence = [0.0] * frame_count
     locked_matchable = [False] * frame_count
     locked_bob = [False] * frame_count
 
@@ -395,19 +500,21 @@ def _build_shadow_strategy(tfm_records, motion_arr, evidence, verified_matchable
         if evidence["vertical_scroll"][index]:
             matchability[index] = "not_matchable"
             shadow_origins[index] = "vertical_scroll_veto"
-            confidence[index] = 1.0
             locked_bob[index] = True
             continue
         if record["combed"]:
             matchability[index] = "not_matchable"
             shadow_origins[index] = "tfm_combed_veto"
-            confidence[index] = 1.0
+            locked_bob[index] = True
+            continue
+        if sensitive_combed_vetoes[index]:
+            matchability[index] = "not_matchable"
+            shadow_origins[index] = "tfm_sensitive_combed_veto"
             locked_bob[index] = True
             continue
         candidates[index] = (
             record["valid"] and
-            record["match"] in TFM_WEAVABLE_MATCHES and
-            record["mic"] <= MM_MATCHABLE_MIC_MAX
+            record["match"] in TFM_WEAVABLE_MATCHES
         )
         if record["match"] is None:
             shadow_origins[index] = "tfm_missing"
@@ -415,8 +522,6 @@ def _build_shadow_strategy(tfm_records, motion_arr, evidence, verified_matchable
             shadow_origins[index] = "tfm_incomplete"
         elif record["match"] not in TFM_WEAVABLE_MATCHES:
             shadow_origins[index] = "tfm_match_not_weavable"
-        elif record["mic"] > MM_MATCHABLE_MIC_MAX:
-            shadow_origins[index] = "tfm_mic_veto"
 
     edge_guard = max(0, MM_MATCHABLE_BOB_EDGE_GUARD)
     if edge_guard:
@@ -459,11 +564,6 @@ def _build_shadow_strategy(tfm_records, motion_arr, evidence, verified_matchable
                 shadow_origins[frame] = "clean_tfm_low_information"
             continue
 
-        max_mic = max(tfm_records[frame]["mic"] for frame in range(start, end))
-        length_score = min(1.0, run_length / max(MM_MATCHABLE_MIN_RUN * 3, 1))
-        motion_score = min(1.0, average_motion / max(MM_MATCHABLE_MIN_MOTION, 1e-9))
-        mic_score = max(0.0, 1.0 - max_mic / max(MM_MATCHABLE_MIC_MAX + 1, 1))
-        run_confidence = (length_score + motion_score + mic_score) / 3.0
         for frame in range(start, end):
             matchability[frame] = "matchable"
             redundancy[frame] = "unknown"
@@ -471,10 +571,8 @@ def _build_shadow_strategy(tfm_records, motion_arr, evidence, verified_matchable
             strategies[frame] = "match_keep_pts"
             if evidence["low_information"][frame]:
                 shadow_origins[frame] = "low_information_absorbed_by_matchable_subrun"
-                confidence[frame] = run_confidence * 0.8
             else:
-                shadow_origins[frame] = "speculative_local_ivtc_verified" if verified_matchable_mask[frame] else "sustained_clean_tfm_multimetric"
-                confidence[frame] = run_confidence
+                shadow_origins[frame] = "sustained_clean_tfm_multimetric"
                 locked_matchable[frame] = True
 
     shadow: ShadowResult = {
@@ -484,7 +582,6 @@ def _build_shadow_strategy(tfm_records, motion_arr, evidence, verified_matchable
         "redundancy_mapping": redundancy_mapping,
         "strategies": strategies,
         "origins": shadow_origins,
-        "confidence": confidence,
         "locked_matchable": locked_matchable,
         "locked_bob": locked_bob,
     }
@@ -492,109 +589,43 @@ def _build_shadow_strategy(tfm_records, motion_arr, evidence, verified_matchable
     return shadow
 
 
-def _apply_speculatively_verified_matchable_subruns(shadow: ShadowResult, tfm_records, verified_matchable_mask) -> tuple[ShadowResult, list[tuple[int, int]]]:
-    """Promote only clean final-branch frames covered by a successful local verification."""
+def _bridge_hard_bob_regions(shadow: ShadowResult, decision_boundaries) -> tuple[ShadowResult, list[tuple[int, int]]]:
+    """Bridge nearby residual-combing anchors without weakening hard bob evidence."""
     validate_shadow_result(shadow)
     frame_count = len(shadow["strategies"])
-    eligible = [
-        verified_matchable_mask[index] and
-        shadow["matchability"][index] == "unknown" and
-        not shadow["locked_bob"][index] and
-        tfm_records[index]["valid"] and
-        tfm_records[index]["match"] in TFM_WEAVABLE_MATCHES and
-        not tfm_records[index]["combed"]
-        for index in range(frame_count)
-    ]
-    promoted_runs = []
-    index = 0
-    while index < frame_count:
-        if not eligible[index]:
-            index += 1
-            continue
-        start = index
-        while index < frame_count and eligible[index]:
-            index += 1
-        end = index
-        if end - start < MM_MATCHABLE_MIN_RUN:
-            continue
-        for frame in range(start, end):
-            shadow["matchability"][frame] = "matchable"
-            shadow["redundancy"][frame] = "unknown"
-            shadow["redundancy_origins"][frame] = "mapping_not_evaluated"
-            shadow["strategies"][frame] = "match_keep_pts"
-            shadow["origins"][frame] = "speculative_local_ivtc_verified"
-            shadow["confidence"][frame] = 0.9
-            shadow["locked_matchable"][frame] = True
-        promoted_runs.append((start, end - 1))
-    validate_shadow_result(shadow)
-    return shadow, promoted_runs
+    if len(decision_boundaries) != frame_count:
+        raise RuntimeError("Bob-region boundaries do not share the shadow cardinality")
+    hard_anchors = [index for index, locked in enumerate(shadow["locked_bob"]) if locked]
+    regions = []
+    if hard_anchors:
+        region_start = hard_anchors[0]
+        previous = hard_anchors[0]
+        for anchor in hard_anchors[1:]:
+            gap = anchor - previous - 1
+            crosses_boundary = any(decision_boundaries[previous + 1:anchor + 1])
+            if gap <= MM_BOB_REGION_MAX_ANCHOR_GAP and not crosses_boundary:
+                previous = anchor
+                continue
+            if previous > region_start:
+                regions.append((region_start, previous))
+            region_start = anchor
+            previous = anchor
+        if previous > region_start:
+            regions.append((region_start, previous))
 
-
-def _recover_soft_mic_matchable_gaps(shadow: ShadowResult, tfm_records, decision_boundaries=None) -> tuple[ShadowResult, list[tuple[int, int]]]:
-    """Recover soft TFM gaps enclosed by agreeing matchable anchors."""
-    validate_shadow_result(shadow)
-    frame_count = len(shadow["strategies"])
-    if len(tfm_records) != frame_count:
-        raise RuntimeError("TFM cardinality does not match shadow strategies")
-    if decision_boundaries is None:
-        decision_boundaries = [False] * frame_count
-
-    recoverable_origins = {"clean_tfm_run_too_short", "tfm_mic_veto"}
-    recovered_runs = []
-    index = 0
-    while index < frame_count:
-        if shadow["matchability"][index] != "unknown" or shadow["locked_bob"][index]:
-            index += 1
-            continue
-        start = index
-        while index < frame_count and shadow["matchability"][index] == "unknown" and not shadow["locked_bob"][index]:
-            index += 1
-        end = index
-
-        if start == 0 or end >= frame_count or decision_boundaries[start] or any(decision_boundaries[start + 1:end + 1]):
-            continue
-        left_anchor = start - 1
-        while left_anchor >= 0 and shadow["matchability"][left_anchor] == "matchable" and not shadow["locked_matchable"][left_anchor]:
-            if decision_boundaries[left_anchor]:
-                break
-            left_anchor -= 1
-        right_anchor = end
-        while right_anchor < frame_count and shadow["matchability"][right_anchor] == "matchable" and not shadow["locked_matchable"][right_anchor]:
-            right_anchor += 1
-            if right_anchor < frame_count and decision_boundaries[right_anchor]:
-                break
-        if left_anchor < 0 or right_anchor >= frame_count or not shadow["locked_matchable"][left_anchor] or not shadow["locked_matchable"][right_anchor]:
-            continue
-
-        records = tfm_records[start:end]
-        origins = shadow["origins"][start:end]
-        if not all(
-            record["valid"] and
-            record["match"] in TFM_WEAVABLE_MATCHES and
-            not record["combed"]
-            for record in records
-        ):
-            continue
-        if not origins or any(origin not in recoverable_origins for origin in origins):
-            continue
-
-        mic_outliers = sum(record["mic"] > MM_MATCHABLE_MIC_MAX for record in records)
-        mic_outlier_ratio = mic_outliers / len(records)
-        if mic_outlier_ratio > MM_MATCHABLE_SOFT_GAP_MIC_RATIO_MAX:
-            continue
-        run_confidence = min(shadow["confidence"][left_anchor], shadow["confidence"][right_anchor])
-        for frame in range(start, end):
-            shadow["matchability"][frame] = "matchable"
-            shadow["redundancy"][frame] = "unknown"
-            shadow["redundancy_origins"][frame] = "mapping_not_evaluated"
-            shadow["strategies"][frame] = "match_keep_pts"
-            shadow["origins"][frame] = "soft_mic_gap_recovered_multimetric"
-            shadow["confidence"][frame] = run_confidence
-            shadow["locked_matchable"][frame] = True
-        recovered_runs.append((start, end - 1))
+    for start, end in regions:
+        for frame in range(start + 1, end):
+            if shadow["locked_bob"][frame]:
+                continue
+            _set_shadow_bob_frame(
+                shadow,
+                frame,
+                "hard_bob_region_bridge",
+                "invalidated_by_residual_combing_region",
+            )
 
     validate_shadow_result(shadow)
-    return shadow, recovered_runs
+    return shadow, regions
 
 
 def _resolve_low_information_runs(shadow: ShadowResult, low_information_mask, decision_boundaries) -> tuple[ShadowResult, list[tuple[int, int, str]]]:
@@ -635,16 +666,13 @@ def _resolve_low_information_runs(shadow: ShadowResult, low_information_mask, de
         left_state = shadow["matchability"][left] if left is not None else None
         right_state = shadow["matchability"][right] if right is not None else None
         inherited_state = None
-        anchor_confidence = 0.0
         if left_state in {"matchable", "not_matchable"} and left_state == right_state:
             inherited_state = left_state
-            anchor_confidence = min(shadow["confidence"][left], shadow["confidence"][right])
         elif end - start <= MM_LOW_INFORMATION_INHERIT_MAX:
             available = [(left_state, left), (right_state, right)]
             available = [(state, anchor) for state, anchor in available if state in {"matchable", "not_matchable"}]
             if len(available) == 1 and min(abs(available[0][1] - start), abs(available[0][1] - end)) <= MM_LOW_INFORMATION_INHERIT_MAX:
-                inherited_state, anchor = available[0]
-                anchor_confidence = shadow["confidence"][anchor]
+                inherited_state, _anchor = available[0]
         if inherited_state is None:
             continue
 
@@ -653,7 +681,6 @@ def _resolve_low_information_runs(shadow: ShadowResult, low_information_mask, de
             shadow["matchability"][frame] = inherited_state
             shadow["strategies"][frame] = "match_keep_pts" if inherited_state == "matchable" else "bob_expand"
             shadow["origins"][frame] = origin
-            shadow["confidence"][frame] = anchor_confidence * 0.8
             if inherited_state == "matchable":
                 shadow["redundancy"][frame] = "unknown"
                 shadow["redundancy_origins"][frame] = "mapping_not_evaluated"
@@ -672,7 +699,6 @@ def _set_shadow_bob_frame(shadow: ShadowResult, index, origin, redundancy_origin
     shadow["redundancy_origins"][index] = redundancy_origin
     shadow["redundancy_mapping"][index] = None
     shadow["origins"][index] = origin
-    shadow["confidence"][index] = 1.0
     shadow["locked_matchable"][index] = False
     shadow["locked_bob"][index] = True
     return changed
@@ -777,15 +803,15 @@ def _apply_shadow_redundancy(shadow: ShadowResult, timeline, entries, matched_te
     retained_sources = set()
     candidate_mask = [False] * frame_count
     ordered_entries = sorted(entries, key=lambda entry: entry[0])
-    for _dec_idx, src_idx, dur_den, _combed in ordered_entries:
+    for _dec_idx, src_idx, _dur_num, dur_den, _combed in ordered_entries:
         if src_idx >= frame_count:
             continue
         retained_sources.add(src_idx)
         if dur_den == 24000:
             candidate_mask[src_idx] = True
     for left, right in zip(ordered_entries, ordered_entries[1:]):
-        _left_dec, left_src, left_den, _left_combed = left
-        _right_dec, right_src, right_den, _right_combed = right
+        _left_dec, left_src, _left_num, left_den, _left_combed = left
+        _right_dec, right_src, _right_num, right_den, _right_combed = right
         if left_den != 24000 or right_den != 24000:
             continue
         for src_idx in range(left_src + 1, min(right_src, frame_count)):
@@ -870,6 +896,97 @@ def _apply_shadow_redundancy(shadow: ShadowResult, timeline, entries, matched_te
     return shadow
 
 
+def _normalize_complete_decimate_cycles(shadow: ShadowResult, timeline, entries) -> tuple[ShadowResult, list[tuple[int, int, int]]]:
+    """Keep IVTC only for complete cycles with a valid TDecimate duration map."""
+    validate_shadow_result(shadow)
+    frame_count = len(shadow["strategies"])
+    source_to_entry = {
+        src_idx: (dec_idx, duration_num, duration_den)
+        for dec_idx, src_idx, duration_num, duration_den, _combed in entries
+        if src_idx < frame_count
+    }
+    expected_retained = MM_TDECIMATE_CYCLE - MM_TDECIMATE_CYCLE_DROP
+    adjustments = []
+
+    for start in range(0, frame_count, MM_TDECIMATE_CYCLE):
+        end = min(start + MM_TDECIMATE_CYCLE, frame_count)
+        decimated_frames = [
+            index
+            for index in range(start, end)
+            if shadow["strategies"][index] == "match_decimate"
+        ]
+        if not decimated_frames:
+            continue
+
+        retained_frames = [
+            index
+            for index in range(start, end)
+            if shadow["redundancy_mapping"][index] == "retained"
+        ]
+        complete_cycle = (
+            end - start == MM_TDECIMATE_CYCLE and
+            len(decimated_frames) == MM_TDECIMATE_CYCLE and
+            len(retained_frames) == expected_retained and
+            all(index in source_to_entry for index in retained_frames)
+        )
+        if complete_cycle:
+            branch_indices = [source_to_entry[index][0] for index in retained_frames]
+            complete_cycle = all(
+                branch_indices[position] + 1 == branch_indices[position + 1]
+                for position in range(len(branch_indices) - 1)
+            )
+        if complete_cycle:
+            tdecimate_duration_ms = sum(
+                source_to_entry[index][1] * 1000.0 / source_to_entry[index][2]
+                for index in retained_frames
+            )
+            source_duration_ms = sum(timeline["duration_ms"][start:end])
+            complete_cycle = (
+                abs(tdecimate_duration_ms - source_duration_ms)
+                <= PTS_DECIMATE_CYCLE_TOLERANCE_MS
+            )
+        if complete_cycle:
+            continue
+
+        for index in decimated_frames:
+            shadow["strategies"][index] = "match_keep_pts"
+            shadow["redundancy"][index] = "unknown"
+            shadow["redundancy_origins"][index] = "mapping_not_evaluated"
+            shadow["redundancy_mapping"][index] = None
+        adjustments.append((start, end - 1, len(decimated_frames)))
+
+    index = 0
+    while index < frame_count:
+        if shadow["strategies"][index] != "match_decimate":
+            index += 1
+            continue
+        start = index
+        while index < frame_count and shadow["strategies"][index] == "match_decimate":
+            index += 1
+        end = index
+        retained_frames = [
+            frame
+            for frame in range(start, end)
+            if shadow["redundancy_mapping"][frame] == "retained"
+        ]
+        tdecimate_duration_ms = sum(
+            source_to_entry[frame][1] * 1000.0 / source_to_entry[frame][2]
+            for frame in retained_frames
+        )
+        source_duration_ms = sum(timeline["duration_ms"][start:end])
+        if abs(tdecimate_duration_ms - source_duration_ms) <= PTS_DECIMATE_CYCLE_TOLERANCE_MS:
+            continue
+        for frame in range(start, end):
+            shadow["strategies"][frame] = "match_keep_pts"
+            shadow["redundancy"][frame] = "unknown"
+            shadow["redundancy_origins"][frame] = "mapping_not_evaluated"
+            shadow["redundancy_mapping"][frame] = None
+        adjustments.append((start, end - 1, end - start))
+
+    validate_shadow_result(shadow)
+    return shadow, adjustments
+
+
 def _observed_cadence(timeline, start, end):
     """Summarize run cadence without using it to select a strategy."""
     durations = timeline["duration_ms"][start:end]
@@ -899,7 +1016,7 @@ def _write_shadow_run_diagnostics(work_dir, stem, timeline, field_metadata, shad
     output_path = work_dir / f"{stem}_classification_shadow_runs_v1.tsv"
     columns = [
         "source_start", "source_end", "pts_start_ms", "pts_end_ms", "source_frames", "output_frames",
-        "strategy", "matchability", "redundancy", "origin", "redundancy_origin", "confidence",
+        "strategy", "matchability", "redundancy", "origin", "redundancy_origin",
         "locked_matchable", "locked_bob", "branch", "observed_rate", "cadence_kind",
         "cadence_label", "field_units", "warning",
     ]
@@ -959,7 +1076,6 @@ def _write_shadow_run_diagnostics(work_dir, stem, timeline, field_metadata, shad
                 "redundancy": shadow["redundancy"][start],
                 "origin": key[2],
                 "redundancy_origin": shadow["redundancy_origins"][start],
-                "confidence": f"{min(shadow['confidence'][start:index]):.6f}",
                 "locked_matchable": int(all(shadow["locked_matchable"][start:index])),
                 "locked_bob": int(all(shadow["locked_bob"][start:index])),
                 "branch": branch,
@@ -972,18 +1088,19 @@ def _write_shadow_run_diagnostics(work_dir, stem, timeline, field_metadata, shad
     return output_path
 
 
-def _write_classification_shadow_diagnostics(work_dir, stem, timeline, field_metadata, tfm_records, motion_arr, matched_temporal_diff, vertical_scroll_hits, evidence, verified_matchable_mask, shadow):
+def _write_classification_shadow_diagnostics(work_dir, stem, timeline, field_metadata, tfm_records, selected_weave_mics, explicit_rff_mask, selected_weave_thresholds, sensitive_combed_vetoes, motion_arr, matched_temporal_diff, vertical_scroll_hits, evidence, shadow):
     """Write per-frame metrics, evidence, and operational decisions."""
     output_path = work_dir / f"{stem}_classification_shadow_v1.tsv"
     columns = [
         "source_index", "pts_ms", "duration_ms", "field_units", "repeat_pict",
         "top_field_first", "pts_quantized",
-        "tfm_match", "tfm_combed", "tfm_mic", "tfm_valid",
+        "tfm_match", "tfm_combed", "tfm_valid",
+        "selected_weave_mic", "explicit_rff", "selected_weave_mi",
+        "sensitive_combed_veto",
         "same_parity_first", "same_parity_second", "vertical_scroll",
         "pts_boundary", "low_information",
-        "speculative_matchable",
         "shadow_matchability", "shadow_redundancy", "shadow_strategy", "shadow_origin",
-        "shadow_redundancy_origin", "shadow_mapping", "shadow_confidence",
+        "shadow_redundancy_origin", "shadow_mapping",
         "locked_matchable", "locked_bob", "matched_temporal_diff",
     ]
     with open(output_path, "w", encoding="utf-8", newline="") as f:
@@ -1000,21 +1117,22 @@ def _write_classification_shadow_diagnostics(work_dir, stem, timeline, field_met
                 "pts_quantized": int(timeline["quantization_valid"][index]),
                 "tfm_match": record["match"],
                 "tfm_combed": "" if record["combed"] is None else int(record["combed"]),
-                "tfm_mic": record["mic"],
                 "tfm_valid": int(record["valid"]),
+                "selected_weave_mic": "" if selected_weave_mics[index] is None else selected_weave_mics[index],
+                "explicit_rff": int(explicit_rff_mask[index]),
+                "selected_weave_mi": selected_weave_thresholds[index],
+                "sensitive_combed_veto": int(sensitive_combed_vetoes[index]),
                 "same_parity_first": f"{motion_arr[index * 2]:.6f}",
                 "same_parity_second": f"{motion_arr[index * 2 + 1]:.6f}",
                 "vertical_scroll": vertical_scroll_hits[index],
                 "pts_boundary": int(evidence["decision_boundaries"][index]),
                 "low_information": int(evidence["low_information"][index]),
-                "speculative_matchable": int(verified_matchable_mask[index]),
                 "shadow_matchability": shadow["matchability"][index],
                 "shadow_redundancy": shadow["redundancy"][index],
                 "shadow_strategy": shadow["strategies"][index],
                 "shadow_origin": shadow["origins"][index],
                 "shadow_redundancy_origin": shadow["redundancy_origins"][index],
                 "shadow_mapping": shadow["redundancy_mapping"][index],
-                "shadow_confidence": f"{shadow['confidence'][index]:.6f}",
                 "locked_matchable": int(shadow["locked_matchable"][index]),
                 "locked_bob": int(shadow["locked_bob"][index]),
                 "matched_temporal_diff": f"{matched_temporal_diff[index]:.6f}",
@@ -1107,118 +1225,6 @@ def _vertical_scroll_force_mask(n_frames, vertical_scroll_hits):
     return force_mask
 
 
-def _build_speculative_verification_mask(shadow: ShadowResult, tfm_records, decision_boundaries):
-    """Pad unresolved clean TFM runs into samples large enough for slow verification."""
-    validate_shadow_result(shadow)
-    frame_count = len(shadow["strategies"])
-    if len(tfm_records) != frame_count or len(decision_boundaries) != frame_count:
-        raise RuntimeError("Speculative verification inputs do not share the source-frame cardinality")
-    clean = [
-        record["valid"] and record["match"] in TFM_WEAVABLE_MATCHES and not record["combed"] and not shadow["locked_bob"][index]
-        for index, record in enumerate(tfm_records)
-    ]
-    unresolved = [clean[index] and shadow["matchability"][index] == "unknown" for index in range(frame_count)]
-    padded_ranges = []
-    index = 0
-    while index < frame_count:
-        if not unresolved[index]:
-            index += 1
-            continue
-        start = index
-        while index < frame_count and unresolved[index] and (index == start or not decision_boundaries[index]):
-            index += 1
-        end = index
-        if end - start < MM_MATCHABLE_MIN_RUN:
-            continue
-        left_matchable = start > 0 and shadow["matchability"][start - 1] == "matchable"
-        right_matchable = end < frame_count and shadow["matchability"][end] == "matchable"
-        if not left_matchable and not right_matchable:
-            continue
-
-        padded_start = start
-        padded_end = end
-        while padded_end - padded_start < MM_VERIFY_MIN_SIZE:
-            extended = False
-            if padded_start > 0 and clean[padded_start - 1] and not decision_boundaries[padded_start]:
-                padded_start -= 1
-                extended = True
-            if padded_end - padded_start >= MM_VERIFY_MIN_SIZE:
-                break
-            if padded_end < frame_count and clean[padded_end] and not decision_boundaries[padded_end]:
-                padded_end += 1
-                extended = True
-            if not extended:
-                break
-        if padded_end - padded_start >= MM_VERIFY_MIN_SIZE:
-            padded_ranges.append((padded_start, padded_end))
-
-    merged_ranges = []
-    for start, end in padded_ranges:
-        if merged_ranges and start <= merged_ranges[-1][1]:
-            merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], end))
-        else:
-            merged_ranges.append((start, end))
-    candidate_mask = [False] * frame_count
-    for start, end in merged_ranges:
-        candidate_mask[start:end] = [True] * (end - start)
-    return candidate_mask
-
-
-def _speculative_ivtc_verification(source_clip, candidate_mask, motion_arr, log_prefix="", field_order="tff"):
-    """Verify padded unresolved TFM runs with slow matching before promotion."""
-    import vapoursynth as vs
-    core = vs.core
-    tfm_order = _field_order_settings(field_order)["tfm_order"]
-
-    n_threads = core.num_threads
-    runs = []
-    index = 0
-    while index < len(candidate_mask):
-        if not candidate_mask[index]:
-            index += 1
-            continue
-        start = index
-        while index < len(candidate_mask) and candidate_mask[index]:
-            index += 1
-        runs.append((start, index))
-
-    n_recovered = 0
-    n_verified = 0
-    n_skipped_low_motion = 0
-    verified_matchable_mask = [False] * len(candidate_mask)
-    for start, end in runs:
-        # Motion is indexed per field, so each source frame occupies two slots.
-        f_start = 2 * start
-        f_end = 2 * end
-        cluster_motion = motion_arr[f_start:f_end]
-        avg_m = sum(cluster_motion) / len(cluster_motion) if cluster_motion else 0.0
-        if avg_m < MM_VERIFY_MIN_MOTION:
-            n_skipped_low_motion += 1
-            continue
-        n_verified += 1
-        sub = source_clip[start:end]
-        try:
-            matched = core.tivtc.TFM(sub, order=tfm_order, cthresh=8, slow=2)
-            n_total = matched.num_frames
-            n_combed = 0
-            for fr in matched.frames(prefetch=n_threads):
-                if fr.props.get('_Combed', 0):
-                    n_combed += 1
-            ratio = n_combed / n_total if n_total > 0 else 1.0
-            if n_combed == 0:
-                verified_matchable_mask[start:end] = [True] * (end - start)
-                n_recovered += end - start
-                print(f"{log_prefix}    Recovered source subrun {start}-{end - 1} ({end - start} frames): combed={ratio:.3f}, motion={avg_m:.1f}")
-        except Exception as e:
-            print(f"{log_prefix}    Verification failed for cluster {start}-{end - 1}: {e}")
-    print(
-        f"{log_prefix}  Verified {n_verified} padded unresolved subruns "
-        f"({n_skipped_low_motion} skipped for low motion), "
-        f"recovered {n_recovered} frames"
-    )
-    return verified_matchable_mask
-
-
 def run_multimetric_classification(source_path, work_dir, tfm_path, src_tc_path, framemap_path, field_order="tff", vs_threads=None, analysis_workers=None, forced_bob_ranges=None) -> AnalysisResult:
     """Run multi-metric classification and final consistency verification.
 
@@ -1268,6 +1274,30 @@ def run_multimetric_classification(source_path, work_dir, tfm_path, src_tc_path,
         f"malformed={tfm_diagnostics['malformed']}, out-of-range={tfm_diagnostics['out_of_range']}"
     )
 
+    print(
+        "    Checking the selected TFM weave for residual combing "
+        f"(metric={MM_TFM_WEAVE_METRIC}, cthresh={MM_TFM_WEAVE_CTHRESH}, "
+        f"MI={MM_TFM_WEAVE_MI}, explicit-RFF MI={MM_TFM_WEAVE_RFF_MI}, luma only)..."
+    )
+    t0 = time.time()
+    selected_weave_mics = _scan_selected_weave_combing(
+        clip,
+        tfm_records,
+        field,
+        n_threads,
+    )
+    explicit_rff_mask = _explicit_rff_run_mask(timeline, tfm_records)
+    sensitive_combed_vetoes, selected_weave_thresholds = _selected_weave_vetoes(
+        selected_weave_mics,
+        explicit_rff_mask,
+    )
+    sensitive_veto_count = sum(sensitive_combed_vetoes)
+    print(
+        f"    Selected-weave check completed in {time.time() - t0:.1f}s: "
+        f"{sensitive_veto_count} residual-combing vetoes, "
+        f"{sum(explicit_rff_mask)} explicit-RFF frames"
+    )
+
     print("    Single parallel scan of source metrics...")
     t0 = time.time()
     motion_arr = [0.0] * (source_frame_count * 2)
@@ -1309,7 +1339,9 @@ def run_multimetric_classification(source_path, work_dir, tfm_path, src_tc_path,
     matched = core.tivtc.TFM(
         clip,
         order=field["tfm_order"],
-        cthresh=8,
+        cthresh=MM_TFM_CTHRESH,
+        MI=MM_TFM_MI,
+        slow=MM_TFM_SLOW,
         input=str(tfm_path),
     )
     with ThreadPoolExecutor(max_workers=metric_workers) as executor:
@@ -1327,34 +1359,27 @@ def run_multimetric_classification(source_path, work_dir, tfm_path, src_tc_path,
 
     locked_60i_mask = _vertical_scroll_force_mask(source_frame_count, vertical_scroll_hits)
     evidence = _build_multimetric_evidence(motion_arr, locked_60i_mask, timeline)
-    shadow = _build_shadow_strategy(tfm_records, motion_arr, evidence)
-    verification_mask = _build_speculative_verification_mask(shadow, tfm_records, evidence["decision_boundaries"])
-    candidate_count = sum(verification_mask)
-    print(f"  Slow TFM verification: {candidate_count} padded candidate frames")
-    verified_matchable_mask = _speculative_ivtc_verification(clip, verification_mask, motion_arr, log_prefix="  ", field_order=field_order)
-    shadow, speculatively_promoted_runs = _apply_speculatively_verified_matchable_subruns(shadow, tfm_records, verified_matchable_mask)
-    if speculatively_promoted_runs:
-        promoted_count = sum(end - start + 1 for start, end in speculatively_promoted_runs)
-        range_text = ", ".join(f"{start}-{end}" for start, end in speculatively_promoted_runs)
-        print(f"  Local speculative IVTC: promoted {promoted_count} clean frames across {len(speculatively_promoted_runs)} runs ({range_text})")
-    shadow, recovered_soft_mic_runs = _recover_soft_mic_matchable_gaps(
-        shadow,
+    shadow = _build_shadow_strategy(
         tfm_records,
-        evidence["decision_boundaries"],
+        sensitive_combed_vetoes,
+        motion_arr,
+        evidence,
     )
-    if recovered_soft_mic_runs:
-        range_text = ", ".join(
-            f"{start}-{end}" for start, end in recovered_soft_mic_runs
-        )
-        recovered_count = sum(end - start + 1 for start, end in recovered_soft_mic_runs)
-        print(
-            f"  Soft-MIC matchable gaps: recovered {recovered_count} frames "
-            f"across {len(recovered_soft_mic_runs)} runs ({range_text})"
-        )
     shadow, resolved_low_information_runs = _resolve_low_information_runs(shadow, evidence["low_information"], evidence["decision_boundaries"])
     if resolved_low_information_runs:
         resolved_count = sum(end - start + 1 for start, end, _state in resolved_low_information_runs)
         print(f"  Low-information inheritance: resolved {resolved_count} frames across {len(resolved_low_information_runs)} runs")
+    shadow, bridged_bob_regions = _bridge_hard_bob_regions(
+        shadow,
+        evidence["decision_boundaries"],
+    )
+    if bridged_bob_regions:
+        bridged_count = sum(end - start + 1 for start, end in bridged_bob_regions)
+        range_text = ", ".join(f"{start}-{end}" for start, end in bridged_bob_regions)
+        print(
+            f"  Residual-combing regions: bobbed {bridged_count} source frames "
+            f"across {len(bridged_bob_regions)} regions ({range_text})"
+        )
     shadow, forced_count = _apply_bob_strategy_overrides(shadow, timeline, forced_bob_ranges)
     if forced_bob_ranges:
         source_end = timeline["pts_ms"][-1] + timeline["duration_ms"][-1]
@@ -1371,13 +1396,45 @@ def run_multimetric_classification(source_path, work_dir, tfm_path, src_tc_path,
             direction = adjustment["direction"].replace("_to_", "->")
             matches = "".join(adjustment["matches"])
             print(f"    {direction}: boundary {adjustment['original_boundary']} -> {adjustment['new_boundary']}, bobbed {adjustment['start']}-{adjustment['end']} (matches={matches})")
-    _validate_bob_field_units(shadow, timeline, field_metadata)
+    framemap_entries = parse_framemap(framemap_path)
     shadow = _apply_shadow_redundancy(
         shadow,
         timeline,
-        parse_framemap(framemap_path),
+        framemap_entries,
         matched_temporal_diff,
     )
+    cycle_adjustments = []
+    post_redundancy_boundary_adjustments = []
+    while True:
+        shadow, current_cycle_adjustments = _normalize_complete_decimate_cycles(
+            shadow,
+            timeline,
+            framemap_entries,
+        )
+        cycle_adjustments.extend(current_cycle_adjustments)
+        shadow, current_boundary_adjustments = _normalize_field_safe_transitions(
+            shadow,
+            tfm_records,
+        )
+        post_redundancy_boundary_adjustments.extend(current_boundary_adjustments)
+        if not current_cycle_adjustments and not current_boundary_adjustments:
+            break
+    if cycle_adjustments:
+        adjusted_count = sum(count for _start, _end, count in cycle_adjustments)
+        print(
+            f"  Complete IVTC cycles: kept {adjusted_count} source frames without decimation "
+            f"across {len(cycle_adjustments)} partial cycles or incompatible runs"
+        )
+    if post_redundancy_boundary_adjustments:
+        adjusted_count = sum(
+            adjustment["end"] - adjustment["start"] + 1
+            for adjustment in post_redundancy_boundary_adjustments
+        )
+        print(
+            f"  Post-IVTC field-safe boundaries: extended bob by {adjusted_count} source frames "
+            f"across {len(post_redundancy_boundary_adjustments)} transitions"
+        )
+    _validate_bob_field_units(shadow, timeline, field_metadata)
     from collections import Counter
     shadow_strategy_counts = Counter(shadow["strategies"])
     shadow_matchability_counts = Counter(shadow["matchability"])
@@ -1390,11 +1447,14 @@ def run_multimetric_classification(source_path, work_dir, tfm_path, src_tc_path,
         timeline,
         field_metadata,
         tfm_records,
+        selected_weave_mics,
+        explicit_rff_mask,
+        selected_weave_thresholds,
+        sensitive_combed_vetoes,
         motion_arr,
         matched_temporal_diff,
         vertical_scroll_hits,
         evidence,
-        verified_matchable_mask,
         shadow,
     )
     run_diagnostic_path = _write_shadow_run_diagnostics(
@@ -1471,7 +1531,7 @@ progressive = core.std.SetFrameProp(clip, prop="_FieldBased", intval=0)
         stats_esc = str(stats_path).replace("\\", "\\\\")
         dummy_esc = str(dummy_path).replace("\\", "\\\\")
         script += f'''
-matched_decimated = build_matched_decimated_branches(core, clip, r"{tfm_esc}", {field["tfm_order"]}, r"{stats_esc}", r"{dummy_esc}", {need_decimated})
+matched_decimated = build_matched_decimated_branches(core, clip, r"{tfm_esc}", {field["tfm_order"]}, r"{stats_esc}", r"{dummy_esc}", {need_decimated}, {MM_TFM_CTHRESH}, {MM_TFM_MI}, {MM_TFM_SLOW})
 matched = matched_decimated["matched"]
 {prepare_output_line.format(name="matched")}\
 '''
@@ -1808,7 +1868,6 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
             entries,
             redundancy_mapping=analysis["redundancy_mapping"],
             origins=analysis["origins"],
-            confidence=analysis["confidence"],
             field_units=analysis["timeline"]["field_units"],
             field_metadata=analysis["field_metadata"],
             matchability=analysis["matchability"],
@@ -1904,10 +1963,9 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
     if frame_range is not None:
         with open(full_timecodes_path, "r", encoding="utf-8") as f:
             full_timestamps = [float(line.strip()) for line in f if line.strip() and not line.startswith("#")]
-        if len(full_timestamps) != num_tc + 1:
+        if len(full_timestamps) != num_tc:
             raise RuntimeError(f"Invalid full timecode cardinality: {len(full_timestamps)} timestamps for {num_tc} frames")
-        all_tc = full_timestamps[:-1]
-        terminal_timestamp = full_timestamps[-1]
+        all_tc = full_timestamps
         if frame_range[0] >= len(all_tc):
             raise ValueError(f"Frame range starts beyond the output: {frame_range[0]} >= {len(all_tc)}")
         fr_start = frame_range[0]
@@ -1916,15 +1974,17 @@ def process_episode(source_path, output_path, work_dir, strip_audio, strip_sub, 
             raise ValueError(f"Frame range is empty after clipping: {fr_start}-{fr_end}")
         selected_tc = all_tc[fr_start:fr_end]
         t_origin = selected_tc[0]
-        range_end_ms = all_tc[fr_end] if fr_end < len(all_tc) else terminal_timestamp
+        range_end_ms = (
+            all_tc[fr_end]
+            if fr_end < len(all_tc)
+            else source_end_ms(read_timecodes_v2(src_tc_path), source_frame_count)
+        )
         trimmed_tc = [tc - t_origin for tc in selected_tc]
-        trimmed_terminal = range_end_ms - t_origin
         tc_final = work_dir / f"{stem}_tc_final.txt"
         with open(tc_final, "w", encoding="utf-8") as f:
             f.write("# timecode format v2\n")
             for tc in trimmed_tc:
                 f.write(f"{tc:.6f}\n")
-            f.write(f"{trimmed_terminal:.6f}\n")
         total_out = len(trimmed_tc)
         ss_s = all_tc[fr_start] / 1000.0
         to_s = range_end_ms / 1000.0

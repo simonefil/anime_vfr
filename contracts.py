@@ -56,14 +56,13 @@ class SegmentRequired(TypedDict):
 class Segment(SegmentRequired, total=False):
     retained_source_indices: list[int]
     dropped_source_indices: list[int]
+    decimated_durations: list[tuple[int, int]]
     bob_field_units: list[int]
     bob_frame_specs: list[tuple[bool, int]]
     kept_positions: list[tuple[int, int]]
     origin: str
     origins: list[str]
     frame_origins: list[str]
-    confidence: float
-    frame_confidence: list[float]
     matchability: str
     matchability_states: list[str]
     frame_matchability: list[str]
@@ -86,7 +85,6 @@ class ShadowResult(TypedDict):
     redundancy_mapping: list[Optional[RedundancyMapping]]
     strategies: list[Strategy]
     origins: list[str]
-    confidence: list[float]
     locked_matchable: list[bool]
     locked_bob: list[bool]
 
@@ -161,6 +159,13 @@ def validate_segment(segment, segment_index=None):
         raise ValueError(f"{label} match_keep_pts branch does not preserve every source frame")
     if strategy == "match_decimate" and len(segment["output_source_indices"]) != len(segment["branch_indices"]):
         raise ValueError(f"{label} decimated source and branch mappings have different lengths")
+    if strategy == "match_decimate" and len(segment.get("decimated_durations", [])) != len(segment["branch_indices"]):
+        raise ValueError(f"{label} decimated durations do not match its branch indices")
+    if strategy == "match_decimate" and any(
+        numerator <= 0 or denominator <= 0
+        for numerator, denominator in segment["decimated_durations"]
+    ):
+        raise ValueError(f"{label} contains an invalid decimated duration")
     if strategy == "match_decimate" and (segment["output_source_indices"] != sorted(set(segment["output_source_indices"])) or segment["branch_indices"] != sorted(set(segment["branch_indices"]))):
         raise ValueError(f"{label} decimated mappings are not strictly increasing")
     if "retained_source_indices" in segment and segment["retained_source_indices"] != segment["output_source_indices"]:
@@ -186,7 +191,7 @@ def validate_segment(segment, segment_index=None):
             expected_position += run_length
         if expected_position != len(segment["branch_indices"]):
             raise ValueError(f"{label} dedup runs do not cover its branch")
-    parallel_segment_keys = ("frame_origins", "frame_confidence", "frame_matchability", "frame_redundancy", "frame_redundancy_origins", "frame_locked_matchable", "frame_locked_bob")
+    parallel_segment_keys = ("frame_origins", "frame_matchability", "frame_redundancy", "frame_redundancy_origins", "frame_locked_matchable", "frame_locked_bob")
     for key in parallel_segment_keys:
         if key in segment and len(segment[key]) != len(source_indices):
             raise ValueError(f"{label} {key} cardinality does not match its source frames")
@@ -206,7 +211,7 @@ def validate_segments(segments, expected_source_frame_count=None):
 
 def validate_analysis_result(analysis):
     """Validate parallel arrays returned by the operational classifier."""
-    required_keys = ("timeline", "field_metadata", "matchability", "redundancy", "redundancy_origins", "redundancy_mapping", "strategies", "origins", "confidence", "locked_matchable", "locked_bob")
+    required_keys = ("timeline", "field_metadata", "matchability", "redundancy", "redundancy_origins", "redundancy_mapping", "strategies", "origins", "locked_matchable", "locked_bob")
     _require_keys(analysis, required_keys, "Analysis result")
     validate_shadow_result(analysis)
     frame_count = len(analysis["strategies"])
@@ -222,7 +227,7 @@ def validate_analysis_result(analysis):
 
 def validate_shadow_result(shadow):
     """Validate the classifier's parallel operational decision arrays."""
-    required_keys = ("matchability", "redundancy", "redundancy_origins", "redundancy_mapping", "strategies", "origins", "confidence", "locked_matchable", "locked_bob")
+    required_keys = ("matchability", "redundancy", "redundancy_origins", "redundancy_mapping", "strategies", "origins", "locked_matchable", "locked_bob")
     _require_keys(shadow, required_keys, "Shadow result")
     frame_count = len(shadow["strategies"])
     for key in required_keys:

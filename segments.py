@@ -8,19 +8,22 @@ from utils import read_timecodes_v2
 
 
 def parse_framemap(framemap_path):
-    """Read pass2a CSV rows as decimated/source/duration/combed tuples."""
+    """Read pass2a CSV rows with exact TDecimate duration rationals."""
     entries = []
     with open(framemap_path, "r") as f:
         for line in f:
             line = line.strip()
             if line:
                 parts = line.split(",")
-                combed = int(parts[3]) if len(parts) > 3 else 0
-                entries.append((int(parts[0]), int(parts[1]), int(parts[2]), combed))
+                if len(parts) != 5:
+                    raise RuntimeError(
+                        f"Legacy or invalid framemap row in {framemap_path}: {line}"
+                    )
+                entries.append(tuple(int(part) for part in parts))
     return entries
 
 
-def strategies_to_segments(strategies: list[Strategy], entries, redundancy_mapping=None, origins=None, confidence=None, field_units=None, field_metadata=None, matchability=None, redundancy=None, redundancy_origins=None, locked_matchable=None, locked_bob=None) -> list[Segment]:
+def strategies_to_segments(strategies: list[Strategy], entries, redundancy_mapping=None, origins=None, field_units=None, field_metadata=None, matchability=None, redundancy=None, redundancy_origins=None, locked_matchable=None, locked_bob=None) -> list[Segment]:
     """Build operational segments from source frames and validated mappings."""
     frame_count = len(strategies)
     if redundancy_mapping is None:
@@ -43,10 +46,10 @@ def strategies_to_segments(strategies: list[Strategy], entries, redundancy_mappi
             raise RuntimeError(f"{name.capitalize()} cardinality does not match strategies")
 
     source_to_decimated = {}
-    for dec_idx, src_idx, _dur_den, _combed in entries:
+    for dec_idx, src_idx, duration_num, duration_den, _combed in entries:
         if src_idx in source_to_decimated:
             raise RuntimeError(f"Duplicate source index in framemap: {src_idx}")
-        source_to_decimated[src_idx] = dec_idx
+        source_to_decimated[src_idx] = (dec_idx, duration_num, duration_den)
 
     segments: list[Segment] = []
     index = 0
@@ -80,6 +83,7 @@ def strategies_to_segments(strategies: list[Strategy], entries, redundancy_mappi
         elif strategy == "match_decimate":
             retained_sources = []
             decimated_indices = []
+            decimated_durations = []
             for src_idx in src_indices:
                 mapping = redundancy_mapping[src_idx]
                 if mapping == "dropped":
@@ -92,8 +96,10 @@ def strategies_to_segments(strategies: list[Strategy], entries, redundancy_mappi
                     raise RuntimeError(
                         f"Retained source frame {src_idx} is absent from the TDecimate framemap"
                     )
+                decimated_index, duration_num, duration_den = source_to_decimated[src_idx]
                 retained_sources.append(src_idx)
-                decimated_indices.append(source_to_decimated[src_idx])
+                decimated_indices.append(decimated_index)
+                decimated_durations.append((duration_num, duration_den))
             if not retained_sources:
                 raise RuntimeError(f"match_decimate segment {start}-{end} has no retained frames")
             if any(
@@ -105,6 +111,7 @@ def strategies_to_segments(strategies: list[Strategy], entries, redundancy_mappi
             item["branch_indices"] = decimated_indices
             item["output_source_indices"] = retained_sources
             item["retained_source_indices"] = retained_sources
+            item["decimated_durations"] = decimated_durations
             item["dropped_source_indices"] = [
                 src_idx for src_idx in src_indices if redundancy_mapping[src_idx] == "dropped"
             ]
@@ -143,9 +150,6 @@ def strategies_to_segments(strategies: list[Strategy], entries, redundancy_mappi
             item["origin"] = Counter(origins[start:index]).most_common(1)[0][0]
             item["origins"] = sorted(set(origins[start:index]))
             item["frame_origins"] = list(origins[start:index])
-        if confidence is not None:
-            item["confidence"] = min(confidence[start:index])
-            item["frame_confidence"] = list(confidence[start:index])
         if matchability is not None:
             item["matchability"] = Counter(matchability[start:index]).most_common(1)[0][0]
             item["matchability_states"] = sorted(set(matchability[start:index]))
@@ -198,11 +202,11 @@ def make_bob_entries_from_source_timecodes(src_tc_path, frame_count=None):
     """Create an all-bob framemap aligned with source timestamps."""
     src_tc = read_timecodes_v2(src_tc_path)
     count = min(len(src_tc), frame_count) if frame_count is not None else len(src_tc)
-    return [(i, i, 30000, 1) for i in range(count)]
+    return [(i, i, 1001, 30000, 1) for i in range(count)]
 
 
 def make_progressive_entries_from_source_timecodes(src_tc_path, frame_count=None):
     """Create a linear progressive framemap aligned with source timestamps."""
     src_tc = read_timecodes_v2(src_tc_path)
     count = min(len(src_tc), frame_count) if frame_count is not None else len(src_tc)
-    return [(i, i, 24000, 0) for i in range(count)]
+    return [(i, i, 1001, 24000, 0) for i in range(count)]

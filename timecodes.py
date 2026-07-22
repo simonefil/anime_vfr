@@ -2,9 +2,11 @@
 """Final VFR timecode generation."""
 
 import math
+from fractions import Fraction
 from statistics import median
 
 from config import (
+    PTS_DECIMATE_CYCLE_TOLERANCE_MS,
     PTS_DURATION_CLUSTER_REL_TOL,
     PTS_FIELD_QUANTIZATION_REL_TOL,
     PTS_MAX_FIELD_UNITS,
@@ -141,8 +143,10 @@ def validate_source_timeline(src_tc_path, frame_count=None) -> SourceTimeline:
     }
 
 
-def source_end_ms(src_tc):
+def source_end_ms(src_tc, frame_count=None):
     """Estimate the source end timestamp from v2 timestamps."""
+    if frame_count is not None and len(src_tc) == frame_count + 1:
+        return src_tc[-1]
     if len(src_tc) >= 2:
         return src_tc[-1] + (src_tc[-1] - src_tc[-2])
     if len(src_tc) == 1:
@@ -161,8 +165,13 @@ def segment_output_frame_count(segment: Segment) -> int:
     return len(segment["branch_indices"])
 
 
+def _fractional_ms(value):
+    """Preserve the decimal precision present in an extracted timestamp."""
+    return Fraction(str(value))
+
+
 def generate_final_timecodes_v2(segments: list[Segment], src_tc_path, output_path, strict_bob_field_units=True):
-    """Write frame timestamps plus an exact terminal timestamp."""
+    """Write source-anchored VFR timestamps using each branch's own clock."""
     frame_count = sum(segment["source_frame_count"] for segment in segments)
     validate_segments(segments, frame_count)
     timeline = validate_source_timeline(src_tc_path, frame_count)
@@ -191,17 +200,38 @@ def generate_final_timecodes_v2(segments: list[Segment], src_tc_path, output_pat
                         f"Inconsistent bob_expand metadata at source frame {src_idx}: "
                         f"timeline={timeline['field_units'][src_idx]}, metadata={units}"
                     )
-                cur = pts_ms[src_idx]
-                field_duration = durations[src_idx] / units
+                cur = _fractional_ms(pts_ms[src_idx])
+                field_duration = _fractional_ms(durations[src_idx]) / units
                 timecodes.extend(cur + field_duration * offset for offset in range(units))
-        elif strategy in ("match_keep_pts", "match_decimate"):
+        elif strategy == "match_decimate":
+            branch_timecodes = []
+            current = _fractional_ms(pts_ms[seg["src_start"]])
+            for duration_num, duration_den in seg["decimated_durations"]:
+                branch_timecodes.append(current)
+                current += Fraction(duration_num * 1000, duration_den)
+            source_end = (
+                _fractional_ms(pts_ms[seg["src_end"]]) +
+                _fractional_ms(durations[seg["src_end"]])
+            )
+            if abs(current - source_end) > _fractional_ms(PTS_DECIMATE_CYCLE_TOLERANCE_MS):
+                raise RuntimeError(
+                    f"Decimated timeline {seg['src_start']}-{seg['src_end']} misses its "
+                    f"source boundary by {float(current - source_end):.6f} ms"
+                )
+            if "kept_positions" in seg:
+                positions = [position for position, _run_len in seg["kept_positions"]]
+            else:
+                positions = range(len(seg["output_source_indices"]))
+            for position in positions:
+                timecodes.append(branch_timecodes[position])
+        elif strategy == "match_keep_pts":
             if "kept_positions" in seg:
                 positions = [position for position, _run_len in seg["kept_positions"]]
             else:
                 positions = range(len(seg["output_source_indices"]))
             for position in positions:
                 src_idx = seg["output_source_indices"][position]
-                timecodes.append(pts_ms[src_idx])
+                timecodes.append(_fractional_ms(pts_ms[src_idx]))
         else:
             raise ValueError(f"Unsupported timecode strategy: {strategy}")
 
@@ -209,7 +239,7 @@ def generate_final_timecodes_v2(segments: list[Segment], src_tc_path, output_pat
         if timecodes[i] <= timecodes[i - 1]:
             raise RuntimeError(
                 f"Non-increasing final timecodes at frame {i}: "
-                f"{timecodes[i - 1]:.6f} -> {timecodes[i]:.6f}"
+                f"{float(timecodes[i - 1]):.6f} -> {float(timecodes[i]):.6f}"
             )
 
     expected_count = sum(segment_output_frame_count(segment) for segment in segments)
@@ -217,16 +247,8 @@ def generate_final_timecodes_v2(segments: list[Segment], src_tc_path, output_pat
         raise RuntimeError(
             f"Invalid timecode cardinality: {len(timecodes)} for {expected_count} output frames"
         )
-    terminal_timestamp = pts_ms[-1] + durations[-1]
-    if not timecodes or terminal_timestamp <= timecodes[-1]:
-        raise RuntimeError(
-            f"Invalid terminal timestamp: {terminal_timestamp:.6f} after "
-            f"{timecodes[-1] if timecodes else 'no output frame'}"
-        )
-
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("# timecode format v2\n")
         for tc in timecodes:
-            f.write(f"{tc:.6f}\n")
-        f.write(f"{terminal_timestamp:.6f}\n")
+            f.write(f"{float(tc):.6f}\n")
     return len(timecodes)
