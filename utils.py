@@ -22,20 +22,3 @@ def box_max_16(arr_int32):
     cs = np.pad(cs, ((1, 0), (1, 0)), mode="constant")
     bs = cs[16:, 16:] - cs[16:, :-16] - cs[:-16, 16:] + cs[:-16, :-16]
     return float(bs.max() / 256.0)
-
-
-def nice_ceil(value):
-    """Round a positive value upward for readable chart scales."""
-    if value <= 0:
-        return 1
-    exp = 10 ** int(np.floor(np.log10(value)))
-    norm = value / exp
-    if norm <= 1:
-        nice = 1
-    elif norm <= 2:
-        nice = 2
-    elif norm <= 5:
-        nice = 5
-    else:
-        nice = 10
-    return int(nice * exp)

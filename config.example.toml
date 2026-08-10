@@ -1,0 +1,11 @@
+[tools]
+mkvmerge = 'C:\path\to\mkvmerge.exe'
+mkvextract = 'C:\path\to\mkvextract.exe'
+mediainfo = 'C:\path\to\MediaInfo.exe'
+ffmpeg = 'C:\path\to\ffmpeg.exe'
+vspipe = 'C:\path\to\VSPipe.exe'
+encoder = 'C:\path\to\NVEncC64.exe'
+ivtc_plugin = 'C:\path\to\vs_ivtc_vulkan.dll'
+
+[encoder]
+params = '--y4m -i - --codec hevc --preset p7 --tune uhq --output-depth 10 --max-bitrate 80000 --lookahead 32 --bframes 5 --ref 6 --cqp 12:14:16 --tf-level 0 --colorrange limited'
